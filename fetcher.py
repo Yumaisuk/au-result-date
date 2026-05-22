@@ -65,35 +65,20 @@ def get_sheet_metadata(sheets_service, progress_callback=None):
 
 
 def read_api_keys(sheets_service, api_tab_name, progress_callback=None):
-    """Read API keys from the API tab.
-    Expected: C2=YouTube, C3=TikTok, C4=Facebook, C5=Instagram
+    """Read API keys from the API tab by position.
+    C2=YouTube, C3=TikTok, C4=Facebook, C5=Instagram
     """
-    range_str = f"'{api_tab_name}'!A1:C10"
+    range_str = f"'{api_tab_name}'!C2:C5"
     result = sheets_service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=range_str
     ).execute()
     rows = result.get("values", [])
 
-    if progress_callback:
-        progress_callback(f"  API keys tab ({len(rows)} rows):")
-
-    yt_key = ""
-    tt_key = ""
-    fb_key = ""
-    ig_key = ""
-    for row in rows:
-        b_val = row[1] if len(row) > 1 else ""
-        c_val = row[2] if len(row) > 2 else ""
-        b_lower = b_val.lower().strip()
-        if "youtube" in b_lower or "yt" in b_lower:
-            yt_key = c_val.strip()
-        elif "tiktok" in b_lower or "tt" in b_lower:
-            tt_key = c_val.strip()
-        elif "facebook" in b_lower or "fb" in b_lower:
-            fb_key = c_val.strip()
-        elif "instagram" in b_lower or "ig" in b_lower:
-            ig_key = c_val.strip()
+    yt_key = rows[0][0].strip() if len(rows) > 0 and len(rows[0]) > 0 else ""
+    tt_key = rows[1][0].strip() if len(rows) > 1 and len(rows[1]) > 0 else ""
+    fb_key = rows[2][0].strip() if len(rows) > 2 and len(rows[2]) > 0 else ""
+    ig_key = rows[3][0].strip() if len(rows) > 3 and len(rows[3]) > 0 else ""
 
     if progress_callback:
         progress_callback(f"  YouTube Key: {'Found' if yt_key else 'NOT FOUND'}")
