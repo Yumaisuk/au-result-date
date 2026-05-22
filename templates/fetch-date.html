@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Au Result Date</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📅 Au Result Date</h1>
+            <p class="subtitle">ดึงข้อมูลแบบเลือกวัน — Channel Content Fetcher</p>
+        </header>
+
+        <main>
+            <div class="run-section">
+                <button id="runBtn" class="run-btn-purple" onclick="startRun()">
+                    ▶ เริ่มดึงข้อมูล / RUN
+                </button>
+                <div id="statusBar" class="status">
+                    สถานะ: <span id="statusText">พร้อมทำงาน</span>
+                </div>
+            </div>
+
+            <div id="progressSection" class="progress-section" style="display:none;">
+                <h2>📋 Progress Log</h2>
+                <div id="progressLog" class="progress-log"></div>
+            </div>
+
+            <div id="notificationBanner" class="notification-banner" style="display:none;"></div>
+
+            <div id="resultsSection" class="results-section" style="display:none;">
+                <h2>📊 ผลลัพธ์</h2>
+                <div class="results-summary" id="resultsSummary"></div>
+                <div class="table-wrapper">
+                    <table id="resultsTable">
+                        <thead>
+                            <tr>
+                                <th>Channel</th>
+                                <th>Subs</th>
+                                <th>Platform</th>
+                                <th>Link</th>
+                                <th>Type</th>
+                                <th>Date</th>
+                                <th>Views</th>
+                                <th>Likes</th>
+                                <th>Comments</th>
+                                <th>Share</th>
+                                <th>Save</th>
+                                <th>Duration</th>
+                                <th>ER%</th>
+                                <th>Caption</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultsBody"></tbody>
+                    </table>
+                </div>
+                <a id="csvLink" href="/download-csv" class="csv-btn" style="display:none;">
+                    📥 ดาวน์โหลด CSV / Download CSV
+                </a>
+            </div>
+        </main>
+
+        <footer>
+            <p>Powered by Au Result Date | <a href="/status" target="_blank">API Status</a></p>
+        </footer>
+    </div>
+
+    <script>
+        let evtSource = null;
+        let pollInterval = null;
+
+        function startRun() {
+            const btn = document.getElementById('runBtn');
+            const statusText = document.getElementById('statusText');
+            const progressSection = document.getElementById('progressSection');
+            const resultsSection = document.getElementById('resultsSection');
+            const progressLog = document.getElementById('progressLog');
+
+            // Reset UI
+            btn.disabled = true;
+            btn.textContent = '⏳ กำลังทำงาน...';
+            btn.classList.add('running');
+            statusText.textContent = 'กำลังทำงาน...';
+            statusText.className = 'running';
+            progressLog.innerHTML = '';
+            progressSection.style.display = 'block';
+            resultsSection.style.display = 'none';
+
+            const banner = document.getElementById('notificationBanner');
+            if (banner) banner.style.display = 'none';
+
+            // Start SSE connection
+            evtSource = new EventSource('/run');
+
+            evtSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'progress') {
+                    appendLog(data.message);
+                } else if (data.type === 'complete') {
+                    appendLog('');
+                    appendLog('🎉 เสร็จแล้ว! / Done!');
+                    finishRun(data.result);
+                    evtSource.close();
+                    evtSource = null;
+                } else if (data.type === 'error') {
+                    appendLog('');
+                    appendLog('❌ Error: ' + data.message);
+                    finishRunError(data.message);
+                    evtSource.close();
+                    evtSource = null;
+                }
+            };
+
+            evtSource.onerror = function() {
+                evtSource.close();
+                evtSource = null;
+                appendLog('');
+                appendLog('⚠️ SSE connection lost — switching to polling mode...');
+                appendLog('📋 The task is still running in the background. Waiting for results...');
+                pollResults();
+            };
+        }
+
+        function appendLog(message) {
+            const log = document.getElementById('progressLog');
+            const line = document.createElement('div');
+            line.textContent = message;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function finishRun(result) {
+            const btn = document.getElementById('runBtn');
+            const statusText = document.getElementById('statusText');
+
+            btn.disabled = false;
+            btn.textContent = '▶ เริ่มดึงข้อมูล / RUN';
+            btn.classList.remove('running');
+            statusText.textContent = 'เสร็จแล้ว! ✅';
+            statusText.className = 'done';
+
+            const banner = document.getElementById('notificationBanner');
+            const totalRows = result.total_rows || 0;
+            banner.className = 'notification-banner success';
+            banner.innerHTML = `✅ <strong>ดึงข้อมูลเสร็จแล้ว!</strong> — ${totalRows} รายการถูกเขียนลง Google Sheet <button onclick="this.parentElement.style.display='none'" class="notif-close">×</button>`;
+            banner.style.display = 'block';
+
+            sendBrowserNotification('✅ Au Result Date - เสร็จแล้ว!', `ดึงข้อมูลเสร็จสมบูรณ์ ${totalRows} รายการ`);
+
+            fetchResults();
+        }
+
+        function finishRunError(message) {
+            const btn = document.getElementById('runBtn');
+            const statusText = document.getElementById('statusText');
+
+            btn.disabled = false;
+            btn.textContent = '▶ เริ่มดึงข้อมูล / RUN';
+            btn.classList.remove('running');
+            statusText.textContent = 'เกิดข้อผิดพลาด ❌';
+            statusText.className = 'error';
+
+            const banner = document.getElementById('notificationBanner');
+            banner.className = 'notification-banner error';
+            banner.innerHTML = `❌ <strong>เกิดข้อผิดพลาด!</strong> — ${escapeHtml(message)} <button onclick="this.parentElement.style.display='none'" class="notif-close">×</button>`;
+            banner.style.display = 'block';
+
+            sendBrowserNotification('❌ Au Result Date - ล้มเหลว!', message);
+        }
+
+        function sendBrowserNotification(title, body) {
+            if ('Notification' in window) {
+                if (Notification.permission === 'granted') {
+                    new Notification(title, { body: body, icon: '🎬' });
+                } else if (Notification.permission !== 'denied') {
+                    Notification.requestPermission().then(permission => {
+                        if (permission === 'granted') {
+                            new Notification(title, { body: body, icon: '🎬' });
+                        }
+                    });
+                }
+            }
+        }
+
+        function pollResults() {
+            if (pollInterval) clearInterval(pollInterval);
+            let pollCount = 0;
+            pollInterval = setInterval(() => {
+                pollCount++;
+                fetch('/results')
+                    .then(r => r.json())
+                    .then(state => {
+                        if (!state.running && state.results) {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                            finishRun(state.results);
+                        } else if (!state.running && state.error) {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                            appendLog('❌ Error: ' + state.error);
+                            finishRunError(state.error);
+                        } else if (state.running) {
+                            if (pollCount % 3 === 0) {
+                                appendLog('⏳ Still running... (polling #' + pollCount + ')');
+                            }
+                        } else {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                            appendLog('✅ Task finished. Checking results...');
+                            fetchResults();
+                            finishRun({ total_rows: 0, success: true });
+                        }
+                    })
+                    .catch(() => {});
+            }, 3000);
+        }
+
+        function fetchResults() {
+            fetch('/results')
+                .then(r => r.json())
+                .then(state => {
+                    if (state.results && state.results.results) {
+                        displayResults(state.results.results);
+                    }
+                })
+                .catch(() => {});
+        }
+
+        function displayResults(rows) {
+            const section = document.getElementById('resultsSection');
+            const summary = document.getElementById('resultsSummary');
+            const tbody = document.getElementById('resultsBody');
+            const csvLink = document.getElementById('csvLink');
+
+            section.style.display = 'block';
+
+            const platformCounts = {};
+            let totalViews = 0;
+            rows.forEach(r => {
+                const p = r.platform || 'unknown';
+                platformCounts[p] = (platformCounts[p] || 0) + 1;
+                const v = parseInt(r.views) || 0;
+                totalViews += v;
+            });
+
+            const icons = {youtube: '🎥', tiktok: '🎵', facebook: '📘', instagram: '📸'};
+            let summaryHtml = `<strong>${rows.length}</strong> รายการ | `;
+            Object.entries(platformCounts).forEach(([p, c]) => {
+                summaryHtml += `${icons[p] || '❓'} ${p}: <strong>${c}</strong> | `;
+            });
+            summaryHtml += `ยอดรวม Views: <strong>${totalViews.toLocaleString()}</strong>`;
+            summary.innerHTML = summaryHtml;
+
+            tbody.innerHTML = '';
+            rows.forEach(r => {
+                const tr = document.createElement('tr');
+                const pIcon = icons[r.platform] || '❓';
+
+                const captionShort = (r.caption || '').length > 50 ? (r.caption || '').substring(0, 50) + '...' : (r.caption || '');
+                const linkHtml = r.link ? `<a href="${escapeHtml(r.link)}" target="_blank" class="table-link">Open</a>` : '';
+
+                tr.innerHTML = `
+                    <td>${escapeHtml(r.channel_name || '')}</td>
+                    <td class="num">${escapeHtml(r.subscribers || '')}</td>
+                    <td>${pIcon} ${escapeHtml(r.platform || '')}</td>
+                    <td>${linkHtml}</td>
+                    <td>${escapeHtml(r.content_type || '')}</td>
+                    <td>${escapeHtml(r.published_date || '')}</td>
+                    <td class="num">${escapeHtml(r.views || '')}</td>
+                    <td class="num">${escapeHtml(r.likes || '')}</td>
+                    <td class="num">${escapeHtml(r.comments || '')}</td>
+                    <td class="num">${escapeHtml(r.shares || '')}</td>
+                    <td class="num">${escapeHtml(r.saves || '')}</td>
+                    <td class="num">${escapeHtml(r.duration || '')}</td>
+                    <td class="num">${escapeHtml(r.er_pct || '')}</td>
+                    <td class="caption" title="${escapeHtml(r.caption || '')}">${escapeHtml(captionShort)}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            csvLink.style.display = 'inline-block';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Check initial status on page load
+        fetch('/status')
+            .then(r => r.json())
+            .then(data => {
+                if (data.running) {
+                    const btn = document.getElementById('runBtn');
+                    btn.disabled = true;
+                    btn.textContent = '⏳ กำลังทำงาน...';
+                    btn.classList.add('running');
+                    document.getElementById('statusText').textContent = 'กำลังทำงาน...';
+                    document.getElementById('statusText').className = 'running';
+                    document.getElementById('progressSection').style.display = 'block';
+                    appendLog('⚠️ Task is already running. Waiting for results...');
+                    pollResults();
+                }
+            })
+            .catch(() => {});
+    </script>
+</body>
+</html>
