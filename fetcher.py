@@ -1138,6 +1138,273 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     return matched_posts, channel_meta
 
 
+def calc_youtube_avg_views(channel_id, api_key, max_videos=10, progress_callback=None):
+    """Fetch latest N videos from a YouTube channel and calculate average views.
+
+    Returns: (avg_views_str, channel_name, subscriber_count, channel_link)
+    avg_views_str is formatted with comma separator, or "" if no videos found.
+    """
+    # Get channel info + uploads playlist
+    url = (
+        f"https://www.googleapis.com/youtube/v3/channels"
+        f"?part=contentDetails,statistics,snippet"
+        f"&id={channel_id}"
+        f"&key={api_key}"
+    )
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to get channel info for avg views: {e}")
+        return "", "", "", ""
+
+    items = data.get("items", [])
+    if not items:
+        return "", "", "", ""
+
+    channel_info = items[0]
+    channel_title = channel_info.get("snippet", {}).get("title", "")
+    subscriber_count = channel_info.get("statistics", {}).get("subscriberCount", "0")
+    uploads_playlist = channel_info.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
+
+    # Build channel link
+    channel_link = f"https://www.youtube.com/channel/{channel_id}"
+
+    if not uploads_playlist:
+        return "", channel_title, subscriber_count, channel_link
+
+    # Collect video IDs from uploads playlist (first page = up to 50, enough for 10)
+    video_ids = []
+    playlist_url = (
+        f"https://www.googleapis.com/youtube/v3/playlistItems"
+        f"?part=snippet&playlistId={uploads_playlist}&maxResults=50"
+        f"&key={api_key}"
+    )
+    req = urllib.request.Request(playlist_url)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            pl_data = json.loads(response.read().decode("utf-8"))
+        for item in pl_data.get("items", []):
+            vid_id = item.get("snippet", {}).get("resourceId", {}).get("videoId", "")
+            if vid_id:
+                video_ids.append(vid_id)
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Error fetching playlist for avg views: {e}")
+        return "", channel_title, subscriber_count, channel_link
+
+    # Take only first max_videos
+    video_ids = video_ids[:max_videos]
+    if not video_ids:
+        return "", channel_title, subscriber_count, channel_link
+
+    # Fetch video details (single batch, up to 50 IDs)
+    ids_str = ",".join(video_ids)
+    vid_url = (
+        f"https://www.googleapis.com/youtube/v3/videos"
+        f"?part=statistics"
+        f"&id={ids_str}"
+        f"&key={api_key}"
+    )
+    req = urllib.request.Request(vid_url)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            vid_data = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Error fetching video stats for avg views: {e}")
+        return "", channel_title, subscriber_count, channel_link
+
+    view_counts = []
+    for item in vid_data.get("items", []):
+        vc = item.get("statistics", {}).get("viewCount", "0")
+        try:
+            view_counts.append(int(vc))
+        except (ValueError, TypeError):
+            pass
+
+    if not view_counts:
+        return "", channel_title, subscriber_count, channel_link
+
+    avg = sum(view_counts) / len(view_counts)
+    avg_str = f"{int(avg):,}"
+
+    if progress_callback:
+        progress_callback(f"    Avg Views ({len(view_counts)} videos): {avg_str}")
+
+    return avg_str, channel_title, subscriber_count, channel_link
+
+
+def calc_tiktok_avg_views(username, api_key, max_videos=10, progress_callback=None):
+    """Fetch latest N videos from a TikTok user and calculate average views.
+
+    Returns: (avg_views_str, channel_name, subscriber_count, channel_link)
+    """
+    username = username.strip().lstrip("@")
+    if "tiktok.com/@" in username:
+        match = re.search(r'tiktok\.com/@([^\s/?&#]+)', username)
+        if match:
+            username = match.group(1)
+
+    TT_API_BASE = "https://tiktok-scraper.omkar.cloud"
+    headers = {"API-Key": api_key}
+
+    # Get user info
+    subscriber_count = "0"
+    channel_name = username
+    user_url = f"{TT_API_BASE}/tiktok/users/profile?handle={urllib.parse.quote(username, safe='')}"
+    req = urllib.request.Request(user_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        user_data = data.get("user", {})
+        user_stats = data.get("stats", {})
+        subscriber_count = str(user_stats.get("follower_count", "0"))
+        channel_name = user_data.get("display_name", user_data.get("handle", username))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to get TikTok user info for avg: {e}")
+
+    channel_link = f"https://www.tiktok.com/@{username}"
+    time.sleep(1)
+
+    # Get videos (first page = up to 30)
+    videos_url = (
+        f"{TT_API_BASE}/tiktok/users/videos"
+        f"?handle={urllib.parse.quote(username, safe='')}"
+        f"&max_results=30"
+        f"&page_cursor=0"
+    )
+    req = urllib.request.Request(videos_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    TikTok Error fetching videos for avg: {e}")
+        return "", channel_name, subscriber_count, channel_link
+
+    videos = data.get("videos", [])
+    if not isinstance(videos, list) or not videos:
+        return "", channel_name, subscriber_count, channel_link
+
+    view_counts = []
+    for video in videos[:max_videos]:
+        views = video.get("stats", {}).get("views", 0)
+        try:
+            view_counts.append(int(views))
+        except (ValueError, TypeError):
+            pass
+
+    if not view_counts:
+        return "", channel_name, subscriber_count, channel_link
+
+    avg = sum(view_counts) / len(view_counts)
+    avg_str = f"{int(avg):,}"
+
+    if progress_callback:
+        progress_callback(f"    Avg Views ({len(view_counts)} videos): {avg_str}")
+
+    return avg_str, channel_name, subscriber_count, channel_link
+
+
+def calc_facebook_avg_views(page_id_or_slug, api_key, max_posts=10, progress_callback=None):
+    """Fetch latest N posts from a Facebook page and calculate average views (video only).
+    If not enough videos, uses reactions as fallback metric.
+
+    Returns: (avg_views_str, channel_name, subscriber_count, channel_link)
+    """
+    FB_API_HOST = "facebook-scraper3.p.rapidapi.com"
+    FB_API_BASE = f"https://{FB_API_HOST}"
+    headers = {
+        "x-rapidapi-host": FB_API_HOST,
+        "x-rapidapi-key": api_key,
+    }
+
+    page_id = page_id_or_slug.strip()
+    subscriber_count = "0"
+    channel_name = page_id
+
+    # Resolve page_id if slug
+    if not page_id.isdigit():
+        page_url = f"https://www.facebook.com/{page_id}" if "facebook.com" not in page_id else page_id
+        api_url = f"{FB_API_BASE}/page/page_id?url={urllib.parse.quote(page_url, safe='')}"
+        req = urllib.request.Request(api_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            resolved_id = data.get("page_id", "")
+            if resolved_id:
+                page_id = resolved_id
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"    Failed to resolve FB page for avg: {e}")
+        time.sleep(1)
+
+    # Get page info
+    page_info_url = f"{FB_API_BASE}/page/info?page_id={page_id}"
+    req = urllib.request.Request(page_info_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        subscriber_count = str(data.get("followers", data.get("follower_count", "0")))
+        channel_name = data.get("name", data.get("page_name", page_id_or_slug))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Could not get FB page info for avg: {e}")
+
+    channel_link = f"https://www.facebook.com/{page_id_or_slug.strip().lstrip('@')}"
+    time.sleep(1)
+
+    # Fetch posts
+    posts_url = f"{FB_API_BASE}/page/posts?page_id={page_id}"
+    req = urllib.request.Request(posts_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Facebook Error fetching posts for avg: {e}")
+        return "", channel_name, subscriber_count, channel_link
+
+    posts = data.get("results", [])
+    if not isinstance(posts, list):
+        posts = []
+
+    # Collect view counts from posts (prefer video views, fallback to reactions)
+    view_counts = []
+    for post in posts[:max_posts]:
+        video_info = post.get("video", {})
+        if isinstance(video_info, dict) and video_info:
+            vc = video_info.get("view_count", video_info.get("views", 0))
+            try:
+                view_counts.append(int(vc))
+            except (ValueError, TypeError):
+                pass
+
+    # If no video views found, use reactions as engagement metric
+    if not view_counts:
+        for post in posts[:max_posts]:
+            rc = post.get("reactions_count", 0)
+            try:
+                view_counts.append(int(rc))
+            except (ValueError, TypeError):
+                pass
+
+    if not view_counts:
+        return "", channel_name, subscriber_count, channel_link
+
+    avg = sum(view_counts) / len(view_counts)
+    avg_str = f"{int(avg):,}"
+
+    if progress_callback:
+        progress_callback(f"    Avg Views ({len(view_counts)} posts): {avg_str}")
+
+    return avg_str, channel_name, subscriber_count, channel_link
+
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -1176,6 +1443,50 @@ def format_published_date(published):
 # ============================================================================
 # WRITE RESULTS TO SHEET
 # ============================================================================
+
+def write_avg_views_to_sheet(sheets_service, avg_tab_name, avg_results, progress_callback=None):
+    """Write Avg.Views results to the 'Avg.Views' tab starting from row 2.
+    A=Channel Name, B=Subs, C=Platform, D=Link, E=Avg Views
+    Clears old data first (from row 2 onwards).
+    """
+    # Clear existing data from row 2 onwards (columns A-E)
+    clear_range = f"'{avg_tab_name}'!A2:E"
+    sheets_service.spreadsheets().values().clear(
+        spreadsheetId=SPREADSHEET_ID,
+        range=clear_range
+    ).execute()
+
+    if not avg_results:
+        if progress_callback:
+            progress_callback("  No avg views results to write")
+        return
+
+    values = []
+    for r in avg_results:
+        values.append([
+            r["channel_name"],    # A
+            r["subscribers"],     # B
+            r["platform"],        # C
+            r["link"],            # D
+            r["avg_views"],       # E
+        ])
+
+    range_str = f"'{avg_tab_name}'!A2"
+    body = {"values": values}
+
+    result = sheets_service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=range_str,
+        valueInputOption="USER_ENTERED",
+        body=body
+    ).execute()
+
+    if progress_callback:
+        updated = result.get("updatedCells", 0)
+        progress_callback(f"  Written {len(values)} rows ({updated} cells) to '{avg_tab_name}'")
+
+    return result
+
 
 def write_results_to_sheet(sheets_service, result_tab_name, results, progress_callback=None):
     """Write matched results to the 'Result' tab starting from row 4.
@@ -1314,6 +1625,7 @@ def run_fetcher(progress_callback=None):
     api_tab_name = None
     channel_tab_name = None
     result_tab_name = None
+    avg_tab_name = None
 
     # Log all discovered tab names for debugging
     log(f"  Discovered {len(sheets)} tabs:")
@@ -1331,6 +1643,8 @@ def run_fetcher(progress_callback=None):
             result_tab_name = title
         elif "kol" in title_lower or "channel" in title_lower or title_lower == "date":
             channel_tab_name = title
+        elif "avg" in title_lower or "average" in title_lower:
+            avg_tab_name = title
 
     # Step 2: Fallback by tab order if name matching missed any
     # Expected tab order: API → Result → Channel KOLs (Date)
@@ -1347,6 +1661,7 @@ def run_fetcher(progress_callback=None):
     log(f"  API tab: '{api_tab_name}'")
     log(f"  Channel KOLs tab: '{channel_tab_name}'")
     log(f"  Result tab: '{result_tab_name}'")
+    log(f"  Avg.Views tab: '{avg_tab_name}'")
 
     if not channel_tab_name:
         log("  ERROR: Could not find Channel KOLs tab!")
@@ -1511,6 +1826,91 @@ def run_fetcher(progress_callback=None):
         log(f"    {icon} {p}: {c}")
 
     log(f"\nDone! Check the Result tab in your Google Sheet.")
+
+    # ---- Calculate and write Avg.Views ----
+    if avg_tab_name:
+        log(f"\n{'=' * 55}")
+        log("CALCULATING AVG VIEWS (10 latest videos per channel)")
+        log("=" * 55)
+
+        avg_results = []
+
+        # YouTube avg views
+        if yt_channels and yt_api_key:
+            log(f"\n--- YouTube Avg Views ({len(yt_channels)} channels) ---")
+            for ch in yt_channels:
+                try:
+                    log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
+                    resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log)
+                    avg_str, ch_name, subs, ch_link = calc_youtube_avg_views(
+                        resolved_id, yt_api_key, max_videos=10, progress_callback=log
+                    )
+                    if ch_name:
+                        avg_results.append({
+                            "channel_name": ch_name,
+                            "subscribers": subs,
+                            "platform": "youtube",
+                            "link": ch_link,
+                            "avg_views": avg_str,
+                        })
+                    time.sleep(1)
+                except Exception as e:
+                    log(f"    ERROR calculating avg views for {ch['channel_name']}: {e}")
+
+        # TikTok avg views
+        if tt_channels and tt_api_key:
+            log(f"\n--- TikTok Avg Views ({len(tt_channels)} channels) ---")
+            for ch in tt_channels:
+                try:
+                    log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
+                    avg_str, ch_name, subs, ch_link = calc_tiktok_avg_views(
+                        ch["channel_id"], tt_api_key, max_videos=10, progress_callback=log
+                    )
+                    if ch_name:
+                        avg_results.append({
+                            "channel_name": ch_name,
+                            "subscribers": subs,
+                            "platform": "tiktok",
+                            "link": ch_link,
+                            "avg_views": avg_str,
+                        })
+                    time.sleep(1)
+                except Exception as e:
+                    log(f"    ERROR calculating avg views for {ch['channel_name']}: {e}")
+
+        # Facebook avg views
+        if fb_channels and fb_api_key:
+            log(f"\n--- Facebook Avg Views ({len(fb_channels)} channels) ---")
+            for ch in fb_channels:
+                try:
+                    log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
+                    avg_str, ch_name, subs, ch_link = calc_facebook_avg_views(
+                        ch["channel_id"], fb_api_key, max_posts=10, progress_callback=log
+                    )
+                    if ch_name:
+                        avg_results.append({
+                            "channel_name": ch_name,
+                            "subscribers": subs,
+                            "platform": "facebook",
+                            "link": ch_link,
+                            "avg_views": avg_str,
+                        })
+                    time.sleep(1)
+                except Exception as e:
+                    log(f"    ERROR calculating avg views for {ch['channel_name']}: {e}")
+
+        # Write avg views to sheet
+        if avg_results:
+            log(f"\nWriting {len(avg_results)} avg views results to 'Avg.Views' tab...")
+            try:
+                write_avg_views_to_sheet(sheets_service, avg_tab_name, avg_results, progress_callback=log)
+                log(f"  Avg.Views tab updated successfully!")
+            except Exception as e:
+                log(f"  Failed to write avg views: {e}")
+        else:
+            log("\n  No avg views results to write.")
+    else:
+        log("\n  No 'Avg.Views' tab found — skipping avg views calculation.")
 
     return {
         "success": True,
