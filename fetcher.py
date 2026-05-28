@@ -66,9 +66,10 @@ def get_sheet_metadata(sheets_service, progress_callback=None):
 
 def read_api_keys(sheets_service, api_tab_name, progress_callback=None):
     """Read API keys from the API tab by position.
-    C2=YouTube, C3=TikTok, C4=Facebook, C5=Instagram
+    C2=YouTube (Official), C3-C5=legacy (no longer used), C6=ScrapeCreators
+    Also supports SCRAPE_CREATORS_API_KEY env var.
     """
-    range_str = f"'{api_tab_name}'!C2:C5"
+    range_str = f"'{api_tab_name}'!C2:C6"
     result = sheets_service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=range_str
@@ -76,16 +77,17 @@ def read_api_keys(sheets_service, api_tab_name, progress_callback=None):
     rows = result.get("values", [])
 
     yt_key = rows[0][0].strip() if len(rows) > 0 and len(rows[0]) > 0 else ""
-    tt_key = rows[1][0].strip() if len(rows) > 1 and len(rows[1]) > 0 else ""
-    fb_key = rows[2][0].strip() if len(rows) > 2 and len(rows[2]) > 0 else ""
-    ig_key = rows[3][0].strip() if len(rows) > 3 and len(rows[3]) > 0 else ""
+    # C3-C5 are legacy keys (omkar.cloud TikTok, RapidAPI Facebook/Instagram) — no longer used
+    sc_key = rows[4][0].strip() if len(rows) > 4 and len(rows[4]) > 0 else ""
+
+    # Fallback: env var for ScrapeCreators key
+    if not sc_key:
+        sc_key = os.environ.get("SCRAPE_CREATORS_API_KEY", "")
 
     if progress_callback:
-        progress_callback(f"  YouTube Key: {'Found' if yt_key else 'NOT FOUND'}")
-        progress_callback(f"  TikTok Key: {'Found' if tt_key else 'NOT FOUND'}")
-        progress_callback(f"  Facebook Key: {'Found' if fb_key else 'NOT FOUND'}")
-        progress_callback(f"  Instagram Key: {'Found' if ig_key else 'NOT FOUND'}")
-    return yt_key, tt_key, fb_key, ig_key
+        progress_callback(f"  YouTube Key (Official): {'Found' if yt_key else 'NOT FOUND'}")
+        progress_callback(f"  ScrapeCreators Key: {'Found' if sc_key else 'NOT FOUND'}")
+    return yt_key, sc_key
 
 
 def extract_channel_id(raw_id, platform):
@@ -632,14 +634,22 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 # TIKTOK - Fetch all videos from a user, then filter
 # ============================================================================
 
+# --- ScrapeCreators API ---
+SC_API_BASE = "https://api.scrapecreators.com"
+
+
+# ============================================================================
+# TIKTOK - ScrapeCreators API
+# ============================================================================
+
 def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
-    """Fetch videos from a TikTok user via omkar.cloud API, filter by date and keywords.
+    """Fetch videos from a TikTok user via ScrapeCreators API, filter by date and keywords.
 
-    Uses tiktok-scraper.omkar.cloud API:
-    - User Profile: GET /tiktok/users/profile?handle=username
-    - User Videos:  GET /tiktok/users/videos?handle=username&max_results=30&page_cursor=0
+    Uses ScrapeCreators API:
+    - User Profile: GET /v1/tiktok/profile?handle=username
+    - User Videos:  GET /v3/tiktok/profile/videos?handle=username&max_cursor=xxx
 
-    API key passed via "API-Key" header (not RapidAPI headers).
+    API key passed via "x-api-key" header.
 
     Returns list of dicts with video data.
     """
@@ -647,56 +657,47 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         keywords = []
 
     # Extract username from URL or plain handle
-    # Supports: "https://www.tiktok.com/@username", "@username", "username"
     username = username.strip()
     if "tiktok.com/@" in username:
-        # Extract handle from URL like https://www.tiktok.com/@poe2thfans
         match = re.search(r'tiktok\.com/@([^\s/?&#]+)', username)
         if match:
             username = match.group(1)
     username = username.lstrip("@")
 
-    TT_API_BASE = "https://tiktok-scraper.omkar.cloud"
-    headers = {
-        "API-Key": api_key,
-    }
+    sc_headers = {"x-api-key": api_key}
 
     # Get user info for subscriber count
     subscriber_count = "0"
     channel_name = username
-    user_url = f"{TT_API_BASE}/tiktok/users/profile?handle={urllib.parse.quote(username, safe='')}"
-    req = urllib.request.Request(user_url, headers=headers, method="GET")
+    profile_url = f"{SC_API_BASE}/v1/tiktok/profile?handle={urllib.parse.quote(username, safe='')}"
+    req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
         user_data = data.get("user", {})
         user_stats = data.get("stats", {})
-        subscriber_count = str(user_stats.get("follower_count", "0"))
-        channel_name = user_data.get("display_name", user_data.get("handle", username))
+        subscriber_count = str(user_stats.get("followerCount", "0"))
+        channel_name = user_data.get("nickname", user_data.get("uniqueId", username))
         if progress_callback:
             progress_callback(f"    TikTok user: @{username} ({channel_name}), followers: {subscriber_count}")
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get TikTok user info for @{username}: {e}")
 
-    time.sleep(1)
+    time.sleep(0.5)
 
-    # Get user's videos with pagination
+    # Get user's videos with pagination (cursor-based)
     matched_videos = []
-    page_cursor = "0"
+    max_cursor = ""
     page_num = 0
-    # Hard limit: max 2 pages (≈60 videos) per channel to conserve API quota
-    # (omkar.cloud free plan = 100 requests/month; 1 profile + 2 video pages = 3 requests/channel)
-    max_pages = 2
+    max_pages = 3  # limit pages to conserve credits
 
     while page_num < max_pages:
-        videos_url = (
-            f"{TT_API_BASE}/tiktok/users/videos"
-            f"?handle={urllib.parse.quote(username, safe='')}"
-            f"&max_results=30"
-            f"&page_cursor={page_cursor}"
-        )
-        req = urllib.request.Request(videos_url, headers=headers, method="GET")
+        params = f"handle={urllib.parse.quote(username, safe='')}"
+        if max_cursor:
+            params += f"&max_cursor={max_cursor}"
+        videos_url = f"{SC_API_BASE}/v3/tiktok/profile/videos?{params}"
+        req = urllib.request.Request(videos_url, headers=sc_headers, method="GET")
 
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
@@ -711,58 +712,56 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
                 progress_callback(f"    TikTok Error fetching videos for @{username}: {e}")
             break
 
-        videos = data.get("videos", [])
+        videos = data.get("aweme_list", [])
         if not isinstance(videos, list) or not videos:
             break
 
         if progress_callback:
             progress_callback(f"    Page {page_num + 1}: Found {len(videos)} videos from @{username}")
 
-        all_before_start = True  # track if all videos in this page are before start_date
+        all_before_start = True
 
         for video in videos:
-            caption = video.get("caption", "")
-            created_at = video.get("created_at", "")
+            caption = video.get("desc", "")
+            create_time = video.get("create_time", "")
 
-            # Parse date (created_at is a Unix timestamp)
+            # Parse date (create_time is Unix timestamp)
             published_date = ""
-            if created_at:
+            if create_time:
                 try:
-                    ts = int(created_at)
+                    ts = int(create_time)
                     dt = datetime.fromtimestamp(ts, tz=BANGKOK_TZ)
                     published_date = dt.strftime("%d/%m/%y")
                 except (ValueError, TypeError):
-                    published_date = str(created_at)
+                    published_date = str(create_time)
 
-            # Date filter (proper datetime comparison, not string)
+            # Date filter
             published_dt = parse_ddmmyy(published_date)
             start_dt = parse_ddmmyy(start_date) if start_date else None
             end_dt = parse_ddmmyy(end_date) if end_date else None
             if start_dt and published_dt and published_dt < start_dt:
                 continue
             if end_dt and published_dt and published_dt > end_dt:
-                # Video is after end_date — still in range chronologically, don't count as "too old"
                 all_before_start = False
                 continue
 
-            # At least one video passed the date range check (not too old, not too new)
             all_before_start = False
 
-            # Keyword filter (strip # so "#POE2" also matches "POE2")
+            # Keyword filter
             if keywords:
                 caption_lower = caption.lower() if caption else ""
                 if not any(kw.lower().lstrip('#') in caption_lower or kw.lower() in caption_lower for kw in keywords):
                     continue
 
-            stats = video.get("stats", {})
-            vid_id = video.get("video_id", "")
-            author = video.get("author", {})
+            stats = video.get("statistics", {})
+            vid_id = video.get("aweme_id", "")
 
-            # Duration (duration_seconds field from omkar.cloud)
-            duration_seconds = video.get("duration_seconds", "")
-            if isinstance(duration_seconds, (int, float)) and duration_seconds:
-                total_minutes = int(duration_seconds) // 60
-                if int(duration_seconds) % 60 > 0:
+            # Duration (video.duration is in milliseconds)
+            video_obj = video.get("video", {})
+            duration_ms = video_obj.get("duration", "")
+            if isinstance(duration_ms, (int, float)) and duration_ms:
+                total_minutes = int(duration_ms) // 60000
+                if int(duration_ms) % 60000 > 0:
                     total_minutes += 1
                 duration_formatted = str(total_minutes)
             else:
@@ -770,8 +769,8 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
 
             video_link = f"https://www.tiktok.com/@{username}/video/{vid_id}" if vid_id else ""
 
-            shares = str(stats.get("shares", ""))
-            saves = str(stats.get("saves", ""))
+            shares = str(stats.get("share_count", ""))
+            saves = str(stats.get("collect_count", ""))
 
             matched_videos.append({
                 "channel_name": channel_name,
@@ -780,29 +779,29 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
                 "link": video_link,
                 "content_type": "Short",
                 "published_date": published_date,
-                "views": str(stats.get("views", "0")),
-                "likes": str(stats.get("likes", "0")),
-                "comments": str(stats.get("comments", "0")),
-                "shares": shares if shares and shares != "None" and shares != "0" else "",
-                "saves": saves if saves and saves != "None" and saves != "0" else "",
+                "views": str(stats.get("play_count", "0")),
+                "likes": str(stats.get("digg_count", "0")),
+                "comments": str(stats.get("comment_count", "0")),
+                "shares": shares if shares and shares not in ("None", "0") else "",
+                "saves": saves if saves and saves not in ("None", "0") else "",
                 "duration": duration_formatted,
                 "caption": caption,
             })
 
-        # Early termination: if ALL videos in this page are before start_date, stop fetching
+        # Early termination: if ALL videos in this page are before start_date
         if start_date and all_before_start:
             if progress_callback:
                 progress_callback(f"    All videos in page {page_num + 1} are older than {start_date}, stopping early")
             break
 
-        # Check for next page cursor (omkar.cloud uses "next_cursor" + "has_more")
-        has_more = data.get("has_more", False)
-        next_cursor = data.get("next_cursor", "")
+        # Check for next page (ScrapeCreators: has_more=1 means more available)
+        has_more = data.get("has_more", 0)
+        next_cursor = str(data.get("max_cursor", ""))
         if not has_more or not next_cursor:
             break
-        page_cursor = str(next_cursor)
+        max_cursor = next_cursor
         page_num += 1
-        time.sleep(1)  # rate limit between pages
+        time.sleep(0.5)
 
     if progress_callback:
         progress_callback(f"    Matched {len(matched_videos)} videos from @{username}")
@@ -812,133 +811,135 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
 
 
 # ============================================================================
-# FACEBOOK - Fetch all posts from a page, then filter
+# FACEBOOK - ScrapeCreators API
 # ============================================================================
 
 def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
-    """Fetch posts from a Facebook page, filter by date and keywords.
+    """Fetch posts from a Facebook page via ScrapeCreators API, filter by date and keywords.
+
+    Uses ScrapeCreators API:
+    - Profile: GET /v1/facebook/profile?url=xxx
+    - Posts:   GET /v1/facebook/profile/posts?pageId=xxx&cursor=xxx
 
     Returns list of dicts with post data.
     """
     if keywords is None:
         keywords = []
 
-    FB_API_HOST = "facebook-scraper3.p.rapidapi.com"
-    FB_API_BASE = f"https://{FB_API_HOST}"
-    headers = {
-        "x-rapidapi-host": FB_API_HOST,
-        "x-rapidapi-key": api_key,
-    }
+    sc_headers = {"x-api-key": api_key}
 
-    # Resolve page_id if slug/URL provided
-    page_id = page_id_or_slug.strip()
+    page_slug = page_id_or_slug.strip()
     subscriber_count = "0"
-    channel_name = page_id
+    channel_name = page_slug
+    page_id = ""
 
-    # If it looks like a slug (not numeric), get page_id first
-    if not page_id.isdigit():
-        page_url = f"https://www.facebook.com/{page_id}" if "facebook.com" not in page_id else page_id
-        api_url = f"{FB_API_BASE}/page/page_id?url={urllib.parse.quote(page_url, safe='')}"
-        req = urllib.request.Request(api_url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            resolved_id = data.get("page_id", "")
-            if resolved_id:
-                page_id = resolved_id
-                if progress_callback:
-                    progress_callback(f"    Resolved '{page_id_or_slug}' -> page_id={page_id}")
-        except Exception as e:
-            if progress_callback:
-                progress_callback(f"    Failed to resolve Facebook page: {e}")
-        time.sleep(1)
+    # Get profile info (name, follower count, page ID)
+    # Accept slug or URL
+    if "facebook.com" not in page_slug:
+        fb_url = f"https://www.facebook.com/{page_slug}"
+    else:
+        fb_url = page_slug
 
-    # Get page info for subscriber count
-    page_info_url = f"{FB_API_BASE}/page/info?page_id={page_id}"
-    req = urllib.request.Request(page_info_url, headers=headers, method="GET")
+    profile_url = f"{SC_API_BASE}/v1/facebook/profile?url={urllib.parse.quote(fb_url, safe='')}"
+    req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
-        subscriber_count = str(data.get("followers", data.get("follower_count", "0")))
-        channel_name = data.get("name", data.get("page_name", page_id_or_slug))
+        page_id = data.get("id", "")
+        channel_name = data.get("name", page_slug)
+        follower_count = data.get("followerCount", 0)
+        if follower_count:
+            subscriber_count = str(follower_count)
+        if progress_callback:
+            progress_callback(f"    Facebook page: {channel_name} (id={page_id}), followers: {subscriber_count}")
     except Exception as e:
         if progress_callback:
-            progress_callback(f"    Could not get page info: {e}")
-    time.sleep(1)
+            progress_callback(f"    Failed to get Facebook profile for {page_slug}: {e}")
 
-    # Fetch posts from page
-    posts_url = f"{FB_API_BASE}/page/posts?page_id={page_id}"
-    req = urllib.request.Request(posts_url, headers=headers, method="GET")
+    time.sleep(0.5)
 
+    # Fetch posts with cursor pagination (returns ~3 posts per request)
     matched_posts = []
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
+    cursor = ""
+    page_num = 0
+    max_pages = 10  # ~30 posts max per channel (3 posts/page × 10 pages)
 
-        posts = data.get("results", [])
-        if not isinstance(posts, list):
-            posts = []
+    while page_num < max_pages:
+        params = []
+        if page_id:
+            params.append(f"pageId={urllib.parse.quote(page_id, safe='')}")
+        else:
+            params.append(f"url={urllib.parse.quote(fb_url, safe='')}")
+        if cursor:
+            params.append(f"cursor={urllib.parse.quote(cursor, safe='')}")
+        posts_url = f"{SC_API_BASE}/v1/facebook/profile/posts?{'&'.join(params)}"
+        req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if progress_callback:
+                progress_callback(f"    Facebook HTTP Error {e.code}")
+            break
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"    Facebook Error for {page_slug}: {e}")
+            break
+
+        posts = data.get("posts", [])
+        if not isinstance(posts, list) or not posts:
+            break
 
         if progress_callback:
-            progress_callback(f"    Found {len(posts)} posts from {channel_name}")
+            progress_callback(f"    Page {page_num + 1}: Found {len(posts)} posts from {channel_name}")
+
+        all_before_start = True
 
         for post in posts:
-            message = post.get("message", post.get("message_rich", ""))
-            timestamp = post.get("timestamp", "")
-            post_url = post.get("url", "")
+            message = post.get("text", "")
+            publish_time = post.get("publishTime", "")
+            post_url = post.get("url", post.get("permalink", ""))
 
-            # Parse date
+            # Parse date (publishTime is Unix timestamp)
             published_date = ""
-            if timestamp:
+            if publish_time:
                 try:
-                    dt = datetime.fromtimestamp(int(timestamp), tz=BANGKOK_TZ)
+                    dt = datetime.fromtimestamp(int(publish_time), tz=BANGKOK_TZ)
                     published_date = dt.strftime("%d/%m/%y")
                 except (ValueError, TypeError):
-                    published_date = str(timestamp)
+                    published_date = str(publish_time)
 
-            # Date filter (proper datetime comparison, not string)
+            # Date filter
             published_dt = parse_ddmmyy(published_date)
             start_dt = parse_ddmmyy(start_date) if start_date else None
             end_dt = parse_ddmmyy(end_date) if end_date else None
             if start_dt and published_dt and published_dt < start_dt:
                 continue
             if end_dt and published_dt and published_dt > end_dt:
+                all_before_start = False
                 continue
 
-            # Keyword filter (strip # so "#POE2" also matches "POE2")
+            all_before_start = False
+
+            # Keyword filter
             if keywords:
                 msg_lower = message.lower() if message else ""
                 if not any(kw.lower().lstrip('#') in msg_lower or kw.lower() in msg_lower for kw in keywords):
                     continue
 
-            reactions_count = str(post.get("reactions_count", "0"))
-            comments_count = str(post.get("comments_count", "0"))
-            reshare_count = str(post.get("reshare_count", "0"))
+            reaction_count = str(post.get("reactionCount", "0"))
+            comment_count = str(post.get("commentCount", "0"))
+            video_view_count = post.get("videoViewCount")
+            video_details = post.get("videoDetails", {})
 
-            video_info = post.get("video", {})
-            video_view_count = "0"
-            has_video = False
-            fb_duration = ""
-            if isinstance(video_info, dict) and video_info:
-                video_view_count = str(video_info.get("view_count", video_info.get("views", "0")))
-                has_video = True
-                fb_dur = video_info.get("duration", video_info.get("length", ""))
-                if isinstance(fb_dur, (int, float)):
-                    total_minutes = int(fb_dur) // 60
-                    if int(fb_dur) % 60 > 0:
-                        total_minutes += 1
-                    fb_duration = str(total_minutes)
-                elif isinstance(fb_dur, str) and fb_dur:
-                    try:
-                        total = int(float(fb_dur))
-                        total_minutes = total // 60
-                        if total % 60 > 0:
-                            total_minutes += 1
-                        fb_duration = str(total_minutes)
-                    except:
-                        fb_duration = ""
-
+            # Determine content type and views
+            has_video = bool(video_details) or video_view_count is not None
             fb_content_type = "VOD" if has_video else "Post"
+
+            views_str = ""
+            if video_view_count is not None and str(video_view_count) != "0":
+                views_str = str(video_view_count)
 
             matched_posts.append({
                 "channel_name": channel_name,
@@ -947,21 +948,28 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
                 "link": post_url,
                 "content_type": fb_content_type,
                 "published_date": published_date,
-                "views": video_view_count if video_view_count != "0" else "",
-                "likes": reactions_count,
-                "comments": comments_count,
-                "shares": reshare_count if reshare_count != "0" else "",
-                "saves": "",
-                "duration": fb_duration,
+                "views": views_str,
+                "likes": reaction_count,
+                "comments": comment_count,
+                "shares": "",      # not available from ScrapeCreators
+                "saves": "",       # not available from ScrapeCreators
+                "duration": "",    # not available from ScrapeCreators
                 "caption": message,
             })
 
-    except urllib.error.HTTPError as e:
-        if progress_callback:
-            progress_callback(f"    Facebook HTTP Error {e.code}")
-    except Exception as e:
-        if progress_callback:
-            progress_callback(f"    Facebook Error for {page_id_or_slug}: {e}")
+        # Early termination: if ALL posts in this page are before start_date
+        if start_date and all_before_start:
+            if progress_callback:
+                progress_callback(f"    All posts in page {page_num + 1} are older than {start_date}, stopping early")
+            break
+
+        # Check for next cursor
+        next_cursor = data.get("cursor", "")
+        if not next_cursor:
+            break
+        cursor = next_cursor
+        page_num += 1
+        time.sleep(0.5)
 
     if progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} posts from {channel_name}")
@@ -971,11 +979,16 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
 
 
 # ============================================================================
-# INSTAGRAM - Fetch all posts from a user, then filter
+# INSTAGRAM - ScrapeCreators API
 # ============================================================================
 
 def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
-    """Fetch posts/reels from an Instagram user, filter by date and keywords.
+    """Fetch posts/reels from an Instagram user via ScrapeCreators API, filter by date and keywords.
+
+    Uses ScrapeCreators API:
+    - Profile: GET /v1/instagram/profile?handle=username
+    - Posts:   GET /v2/instagram/user/posts?handle=username&next_max_id=xxx
+    - Reels:   GET /v1/instagram/user/reels?handle=username&max_id=xxx
 
     Returns list of dicts with post data.
     """
@@ -984,152 +997,271 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
     username = username.strip().lstrip("@")
 
-    IG_API_HOST = "instagram-scraper-stable-api.p.rapidapi.com"
-    IG_API_BASE = f"https://{IG_API_HOST}"
-    headers = {
-        "x-rapidapi-host": IG_API_HOST,
-        "x-rapidapi-key": api_key,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
+    sc_headers = {"x-api-key": api_key}
 
-    # Get user info
+    # Get user info for subscriber count
     subscriber_count = "0"
     channel_name = username
-    body = urllib.parse.urlencode({"username_or_url": username}).encode()
-    req = urllib.request.Request(f"{IG_API_BASE}/get_ig_user_info.php", data=body, headers=headers, method="POST")
+    profile_url = f"{SC_API_BASE}/v1/instagram/profile?handle={urllib.parse.quote(username, safe='')}"
+    req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
         user_data = data.get("user", data)
         subscriber_count = str(user_data.get("follower_count", user_data.get("followers", "0")))
         channel_name = user_data.get("full_name", user_data.get("username", username))
+        if progress_callback:
+            progress_callback(f"    IG user: @{username} ({channel_name}), followers: {subscriber_count}")
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get IG user info for @{username}: {e}")
-    time.sleep(1)
+
+    time.sleep(0.5)
 
     matched_posts = []
-    all_items = []
+    seen_codes = set()  # deduplicate posts vs reels
 
-    # Fetch posts
-    body = urllib.parse.urlencode({"username_or_url": username}).encode()
-    req = urllib.request.Request(f"{IG_API_BASE}/get_ig_user_posts.php", data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        posts = data.get("posts", [])
-        if isinstance(posts, list):
-            for post_item in posts:
-                node = post_item.get("node", post_item) if isinstance(post_item, dict) else post_item
-                node["_source"] = "post"
-                all_items.append(node)
+    # ---- Fetch Posts ----
+    next_max_id = ""
+    page_num = 0
+    max_pages = 3
+
+    while page_num < max_pages:
+        params = f"handle={urllib.parse.quote(username, safe='')}"
+        if next_max_id:
+            params += f"&next_max_id={urllib.parse.quote(next_max_id, safe='')}"
+        posts_url = f"{SC_API_BASE}/v2/instagram/user/posts?{params}"
+        req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as e:
             if progress_callback:
-                progress_callback(f"    Fetched {len(posts)} posts from @{username}")
-    except Exception as e:
+                progress_callback(f"    Failed to fetch IG posts: {e}")
+            break
+
+        items = data.get("items", [])
+        if not isinstance(items, list) or not items:
+            break
+
         if progress_callback:
-            progress_callback(f"    Failed to fetch IG posts: {e}")
-    time.sleep(1)
+            progress_callback(f"    Posts page {page_num + 1}: Found {len(items)} items from @{username}")
 
-    # Fetch reels
-    body = urllib.parse.urlencode({"username_or_url": username}).encode()
-    req = urllib.request.Request(f"{IG_API_BASE}/get_ig_user_reels.php", data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        reels = data.get("reels", [])
-        if isinstance(reels, list):
-            for reel_item in reels:
-                node = reel_item.get("node", reel_item) if isinstance(reel_item, dict) else reel_item
-                media = node.get("media", node)
-                media["_source"] = "reel"
-                all_items.append(media)
-            if progress_callback:
-                progress_callback(f"    Fetched {len(reels)} reels from @{username}")
-    except Exception as e:
-        if progress_callback:
-            progress_callback(f"    Failed to fetch IG reels: {e}")
-    time.sleep(1)
+        for item in items:
+            code = item.get("code", "")
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
 
-    # Process all items
-    for item in all_items:
-        source = item.pop("_source", "post")
+            # Parse caption
+            caption_obj = item.get("caption")
+            if isinstance(caption_obj, dict):
+                caption = caption_obj.get("text", "")
+            elif isinstance(caption_obj, str):
+                caption = caption_obj
+            else:
+                caption = ""
 
-        caption_obj = item.get("caption", {})
-        if isinstance(caption_obj, dict):
-            caption = caption_obj.get("text", "")
-        elif isinstance(caption_obj, str):
-            caption = caption_obj
-        else:
-            caption = ""
+            taken_at = item.get("taken_at", "")
+            published_date = ""
+            if taken_at:
+                try:
+                    dt = datetime.fromtimestamp(int(taken_at), tz=BANGKOK_TZ)
+                    published_date = dt.strftime("%d/%m/%y")
+                except (ValueError, TypeError):
+                    published_date = str(taken_at)
 
-        taken_at = item.get("taken_at", "")
-        published_date = ""
-        if taken_at:
-            try:
-                dt = datetime.fromtimestamp(int(taken_at), tz=BANGKOK_TZ)
-                published_date = dt.strftime("%d/%m/%y")
-            except (ValueError, TypeError):
-                published_date = str(taken_at)
-
-        # Date filter (proper datetime comparison, not string)
-        published_dt = parse_ddmmyy(published_date)
-        start_dt = parse_ddmmyy(start_date) if start_date else None
-        end_dt = parse_ddmmyy(end_date) if end_date else None
-        if start_dt and published_dt and published_dt < start_dt:
-            continue
-        if end_dt and published_dt and published_dt > end_dt:
-            continue
-
-        # Keyword filter (strip # so "#POE2" also matches "POE2")
-        if keywords:
-            cap_lower = caption.lower() if caption else ""
-            if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
+            # Date filter
+            published_dt = parse_ddmmyy(published_date)
+            start_dt = parse_ddmmyy(start_date) if start_date else None
+            end_dt = parse_ddmmyy(end_date) if end_date else None
+            if start_dt and published_dt and published_dt < start_dt:
+                continue
+            if end_dt and published_dt and published_dt > end_dt:
                 continue
 
-        # Content type
-        if source == "reel":
-            content_type = "Short"
-        else:
+            # Keyword filter
+            if keywords:
+                cap_lower = caption.lower() if caption else ""
+                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
+                    continue
+
+            # Content type
             media_type = item.get("media_type", 0)
-            if media_type == 2:
+            product_type = item.get("product_type", "")
+            if product_type == "clips":
+                content_type = "Short"  # Reel
+            elif media_type == 2:
                 content_type = "VOD"
-            elif media_type == 8:
-                content_type = "Post"
             else:
                 content_type = "Post"
 
-        code = item.get("code", "")
-        if source == "reel":
+            # Link
+            if product_type == "clips":
+                link = f"https://www.instagram.com/reel/{code}/" if code else ""
+            else:
+                link = f"https://www.instagram.com/p/{code}/" if code else ""
+
+            like_count = str(item.get("like_count", "0"))
+            comment_count = str(item.get("comment_count", "0"))
+
+            play_count = item.get("play_count")
+            ig_play_count = item.get("ig_play_count")
+            views = ""
+            if play_count is not None and str(play_count) != "0":
+                views = str(play_count)
+            elif ig_play_count is not None and str(ig_play_count) != "0":
+                views = str(ig_play_count)
+
+            # Duration
+            video_duration = item.get("video_duration")
+            duration_str = ""
+            if isinstance(video_duration, (int, float)) and video_duration:
+                total_minutes = int(video_duration) // 60
+                if int(video_duration) % 60 > 0:
+                    total_minutes += 1
+                duration_str = str(total_minutes)
+
+            matched_posts.append({
+                "channel_name": channel_name,
+                "subscribers": subscriber_count,
+                "platform": "instagram",
+                "link": link,
+                "content_type": content_type,
+                "published_date": published_date,
+                "views": views,
+                "likes": like_count,
+                "comments": comment_count,
+                "shares": "",
+                "saves": "",
+                "duration": duration_str,
+                "caption": caption,
+            })
+
+        # Pagination
+        more = data.get("more_available", False)
+        next_id = data.get("next_max_id", "")
+        if not more or not next_id:
+            break
+        next_max_id = next_id
+        page_num += 1
+        time.sleep(0.5)
+
+    # ---- Fetch Reels (separate tab) ----
+    reels_max_id = ""
+    page_num = 0
+    max_reel_pages = 3
+
+    while page_num < max_reel_pages:
+        params = f"handle={urllib.parse.quote(username, safe='')}"
+        if reels_max_id:
+            params += f"&max_id={urllib.parse.quote(reels_max_id, safe='')}"
+        reels_url = f"{SC_API_BASE}/v1/instagram/user/reels?{params}"
+        req = urllib.request.Request(reels_url, headers=sc_headers, method="GET")
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"    Failed to fetch IG reels: {e}")
+            break
+
+        reel_items = data.get("items", [])
+        if not isinstance(reel_items, list) or not reel_items:
+            break
+
+        if progress_callback:
+            progress_callback(f"    Reels page {page_num + 1}: Found {len(reel_items)} reels from @{username}")
+
+        for reel_item in reel_items:
+            media = reel_item.get("media", reel_item)
+            code = media.get("code", "")
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+
+            # Caption is often null on reels endpoint
+            caption_obj = media.get("caption")
+            if isinstance(caption_obj, dict):
+                caption = caption_obj.get("text", "")
+            elif isinstance(caption_obj, str):
+                caption = caption_obj
+            else:
+                caption = ""
+
+            taken_at = media.get("taken_at", "")
+            published_date = ""
+            if taken_at:
+                try:
+                    dt = datetime.fromtimestamp(int(taken_at), tz=BANGKOK_TZ)
+                    published_date = dt.strftime("%d/%m/%y")
+                except (ValueError, TypeError):
+                    published_date = str(taken_at)
+
+            # Date filter
+            published_dt = parse_ddmmyy(published_date)
+            start_dt = parse_ddmmyy(start_date) if start_date else None
+            end_dt = parse_ddmmyy(end_date) if end_date else None
+            if start_dt and published_dt and published_dt < start_dt:
+                continue
+            if end_dt and published_dt and published_dt > end_dt:
+                continue
+
+            # Keyword filter
+            if keywords:
+                cap_lower = caption.lower() if caption else ""
+                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
+                    continue
+
             link = f"https://www.instagram.com/reel/{code}/" if code else ""
-        else:
-            link = f"https://www.instagram.com/p/{code}/" if code else ""
 
-        like_count = str(item.get("like_count", "0"))
-        comment_count = str(item.get("comment_count", "0"))
+            like_count = str(media.get("like_count", "0"))
+            comment_count = str(media.get("comment_count", "0"))
 
-        play_count = item.get("play_count", None)
-        view_count = item.get("view_count", None)
-        views = ""
-        if play_count is not None:
-            views = str(play_count)
-        elif view_count is not None:
-            views = str(view_count) if str(view_count) != "0" else ""
+            play_count = media.get("play_count")
+            ig_play_count = media.get("ig_play_count")
+            views = ""
+            if play_count is not None and str(play_count) != "0":
+                views = str(play_count)
+            elif ig_play_count is not None and str(ig_play_count) != "0":
+                views = str(ig_play_count)
 
-        matched_posts.append({
-            "channel_name": channel_name,
-            "subscribers": subscriber_count,
-            "platform": "instagram",
-            "link": link,
-            "content_type": content_type,
-            "published_date": published_date,
-            "views": views,
-            "likes": like_count,
-            "comments": comment_count,
-            "shares": "",
-            "saves": "",
-            "duration": "",
-            "caption": caption,
-        })
+            # Duration
+            video_duration = media.get("video_duration")
+            duration_str = ""
+            if isinstance(video_duration, (int, float)) and video_duration:
+                total_minutes = int(video_duration) // 60
+                if int(video_duration) % 60 > 0:
+                    total_minutes += 1
+                duration_str = str(total_minutes)
+
+            matched_posts.append({
+                "channel_name": channel_name,
+                "subscribers": subscriber_count,
+                "platform": "instagram",
+                "link": link,
+                "content_type": "Short",
+                "published_date": published_date,
+                "views": views,
+                "likes": like_count,
+                "comments": comment_count,
+                "shares": "",
+                "saves": "",
+                "duration": duration_str,
+                "caption": caption,
+            })
+
+        # Pagination
+        paging = data.get("paging_info", {})
+        more = paging.get("more_available", False)
+        next_id = paging.get("max_id", "")
+        if not more or not next_id:
+            break
+        reels_max_id = next_id
+        page_num += 1
+        time.sleep(0.5)
 
     if progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} items from @{username}")
@@ -1373,7 +1505,7 @@ def run_fetcher(progress_callback=None):
 
     # Read API keys
     log("\nReading API keys...")
-    yt_api_key, tt_api_key, fb_api_key, ig_api_key = read_api_keys(sheets_service, api_tab_name, progress_callback=log)
+    yt_api_key, sc_api_key = read_api_keys(sheets_service, api_tab_name, progress_callback=log)
 
     # Read channel list
     log("\nReading channel list...")
@@ -1418,58 +1550,58 @@ def run_fetcher(progress_callback=None):
         log("\n  YouTube channels found but no API key. Skipping.")
 
     # ---- Fetch TikTok channels ----
-    if tt_channels and tt_api_key:
+    if tt_channels and sc_api_key:
         log(f"\n--- Fetching TikTok channels ({len(tt_channels)}) ---")
         for ch in tt_channels:
             try:
                 log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
                 videos, _ = fetch_tiktok_channel_videos(
-                    ch["channel_id"], tt_api_key,
+                    ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(videos)
-                time.sleep(1)
+                time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-    elif tt_channels and not tt_api_key:
-        log("\n  TikTok channels found but no API key. Skipping.")
+    elif tt_channels and not sc_api_key:
+        log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
 
     # ---- Fetch Facebook channels ----
-    if fb_channels and fb_api_key:
+    if fb_channels and sc_api_key:
         log(f"\n--- Fetching Facebook pages ({len(fb_channels)}) ---")
         for ch in fb_channels:
             try:
                 log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
                 posts, _ = fetch_facebook_channel_posts(
-                    ch["channel_id"], fb_api_key,
+                    ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(posts)
-                time.sleep(1)
+                time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-    elif fb_channels and not fb_api_key:
-        log("\n  Facebook channels found but no API key. Skipping.")
+    elif fb_channels and not sc_api_key:
+        log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
 
     # ---- Fetch Instagram channels ----
-    if ig_channels and ig_api_key:
+    if ig_channels and sc_api_key:
         log(f"\n--- Fetching Instagram accounts ({len(ig_channels)}) ---")
         for ch in ig_channels:
             try:
                 log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
                 posts, _ = fetch_instagram_channel_posts(
-                    ch["channel_id"], ig_api_key,
+                    ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(posts)
-                time.sleep(1)
+                time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-    elif ig_channels and not ig_api_key:
-        log("\n  Instagram channels found but no API key. Skipping.")
+    elif ig_channels and not sc_api_key:
+        log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
 
     # Write results
     log(f"\nWriting {len(all_results)} results to Google Sheet...")
