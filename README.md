@@ -24,6 +24,13 @@ a Discord bot panel or from the web UI.
 - **Discord bot** (`discord_bot.py`): run `/panel` in your server to post a
   message with a "เริ่มดึงข้อมูล" button (starts a run, edits the message with
   progress and the final result) and a "เปิด Google Sheet" link button.
+- To keep the channel from filling up with old run status messages, the bot
+  automatically purges its own status messages older than 7 days once a day.
+  It never deletes pinned messages or the `/panel` control panel message
+  itself (identified by having buttons), and never touches messages from
+  other users. Target channel is `DISCORD_CLEANUP_CHANNEL_ID` (defaults to
+  the main status channel already configured). Requires the bot to have the
+  "Manage Messages" permission in that channel.
 - **Web UI** (`templates/fetch-date.html`): triggers a run via `/run`, which
   streams progress over Server-Sent Events; the result CSV can be downloaded
   from `/download-csv`.
@@ -43,6 +50,8 @@ a Discord bot panel or from the web UI.
    - `DISCORD_BOT_TOKEN` (Discord bot token — omit to run without the Discord bot)
    - `DISCORD_GUILD_ID` (optional — your server's ID, makes the `/panel` slash
      command sync instantly instead of waiting up to an hour for a global sync)
+   - `DISCORD_CLEANUP_CHANNEL_ID` (optional — channel to auto-purge old bot
+     status messages from every 24h; defaults to the main status channel)
 3. Run locally:
    ```
    python app.py
