@@ -15,7 +15,7 @@ _lock = threading.Lock()
 _STALE_SECONDS = 300
 
 
-def start_run(progress_callback, done_callback):
+def start_run(progress_callback, done_callback, progress_percent_callback=None):
     """Start a fetch run in a background thread.
 
     Returns True if a run was started, False if one is already in progress
@@ -39,7 +39,10 @@ def start_run(progress_callback, done_callback):
 
     def worker():
         try:
-            result = run_fetcher(progress_callback=progress_callback)
+            result = run_fetcher(
+                progress_callback=progress_callback,
+                progress_percent_callback=progress_percent_callback,
+            )
             state["results"] = result
             state["error"] = result.get("error")
             done_callback(result)

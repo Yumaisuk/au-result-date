@@ -346,7 +346,7 @@ def parse_date_flexible(date_str, fallback_month=""):
 # YOUTUBE - Fetch all videos from a channel, then filter
 # ============================================================================
 
-def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
+def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usage=None):
     """Resolve a YouTube channel identifier to a channel ID.
     Handles: @handle, UC... channel ID, full URL
     """
@@ -379,6 +379,8 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
         try:
             with urllib.request.urlopen(req, timeout=15) as response:
                 data = json.loads(response.read().decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
             items = data.get("items", [])
             if items:
                 ch_id = items[0].get("snippet", {}).get("channelId", "")
@@ -394,7 +396,7 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
     return channel_id
 
 
-def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
+def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None, usage=None):
     """Fetch all videos from a YouTube channel, filter by date range and keywords.
 
     Returns list of dicts with video data.
@@ -413,6 +415,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
+        if usage is not None:
+            usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get channel info for {channel_id}: {e}")
@@ -459,6 +463,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         try:
             with urllib.request.urlopen(req, timeout=15) as response:
                 pl_data = json.loads(response.read().decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # playlistItems.list costs 1 unit
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Error fetching playlist: {e}")
@@ -514,6 +520,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
                 vid_data = json.loads(response.read().decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Error fetching video batch: {e}")
@@ -1271,6 +1279,27 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
 
 # ============================================================================
+# ACCOUNT STATUS
+# ============================================================================
+
+def get_scrapecreators_credit_balance(api_key, progress_callback=None):
+    """Get remaining ScrapeCreators API credits for this account.
+
+    Returns the credit count (int), or None if the check failed.
+    """
+    url = f"{SC_API_BASE}/v1/account/credit-balance"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data.get("creditCount")
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"  Failed to get ScrapeCreators credit balance: {e}")
+        return None
+
+
+# ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
@@ -1396,7 +1425,7 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
 # MAIN ENTRY POINT
 # ============================================================================
 
-def run_fetcher(progress_callback=None):
+def run_fetcher(progress_callback=None, progress_percent_callback=None):
     """Main entry point.
 
     Flow:
@@ -1408,11 +1437,21 @@ def run_fetcher(progress_callback=None):
     6. Write matched results to 'Result' tab starting row 4
 
     Returns:
-        dict with keys: success, total_rows, results, error
+        dict with keys: success, total_rows, results, error, yt_units_used,
+        sc_credits_remaining
     """
     def log(msg):
         if progress_callback:
             progress_callback(msg)
+
+    completed_channels = 0
+    total_channels_holder = {"total": 0}
+
+    def channel_done():
+        nonlocal completed_channels
+        completed_channels += 1
+        if progress_percent_callback:
+            progress_percent_callback(completed_channels, total_channels_holder["total"])
 
     log("Au Date Result -> Channel Content Fetcher")
     log("=" * 55)
@@ -1515,6 +1554,9 @@ def run_fetcher(progress_callback=None):
         log("  No channels found. Exiting.")
         return {"success": False, "total_rows": 0, "results": [], "error": "No channels found"}
 
+    total_channels_holder["total"] = len(channels)
+    yt_usage = {"yt_units": 0}
+
     yt_channels = [ch for ch in channels if ch["platform"] == "youtube"]
     tt_channels = [ch for ch in channels if ch["platform"] == "tiktok"]
     fb_channels = [ch for ch in channels if ch["platform"] == "facebook"]
@@ -1534,11 +1576,11 @@ def run_fetcher(progress_callback=None):
         for ch in yt_channels:
             try:
                 log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
-                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log)
+                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
                 videos, _ = fetch_youtube_channel_videos(
                     resolved_id, yt_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
+                    progress_callback=log, usage=yt_usage
                 )
                 all_results.extend(videos)
                 time.sleep(1)
@@ -1546,6 +1588,8 @@ def run_fetcher(progress_callback=None):
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
                 import traceback
                 log(f"    {traceback.format_exc()[:200]}")
+            finally:
+                channel_done()
     elif yt_channels and not yt_api_key:
         log("\n  YouTube channels found but no API key. Skipping.")
 
@@ -1564,6 +1608,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif tt_channels and not sc_api_key:
         log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1582,6 +1628,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif fb_channels and not sc_api_key:
         log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1600,6 +1648,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif ig_channels and not sc_api_key:
         log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1626,6 +1676,11 @@ def run_fetcher(progress_callback=None):
     except Exception as e:
         log(f"  Could not save CSV backup: {e}")
 
+    # Check remaining ScrapeCreators credits
+    sc_credits_remaining = None
+    if sc_api_key:
+        sc_credits_remaining = get_scrapecreators_credit_balance(sc_api_key, progress_callback=log)
+
     # Summary
     log("\n" + "=" * 55)
     log("SUMMARY")
@@ -1642,6 +1697,11 @@ def run_fetcher(progress_callback=None):
         icon = {"youtube": "YT", "tiktok": "TT", "facebook": "FB", "instagram": "IG"}.get(p, "??")
         log(f"    {icon} {p}: {c}")
 
+    if yt_usage["yt_units"]:
+        log(f"  YouTube units used this run: ~{yt_usage['yt_units']} (Google doesn't expose remaining daily quota via API key - check Google Cloud Console)")
+    if sc_credits_remaining is not None:
+        log(f"  ScrapeCreators credits remaining: {sc_credits_remaining}")
+
     log(f"\nDone! Check the Result tab in your Google Sheet.")
 
     return {
@@ -1649,4 +1709,6 @@ def run_fetcher(progress_callback=None):
         "total_rows": len(all_results),
         "results": all_results,
         "error": None,
+        "yt_units_used": yt_usage["yt_units"],
+        "sc_credits_remaining": sc_credits_remaining,
     }
