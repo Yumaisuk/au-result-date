@@ -20,6 +20,37 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 # ============================================================================
+# HTTP HELPERS
+# ============================================================================
+
+def urlopen_with_retry(req, timeout=15, retries=2, backoff=1.5):
+    """Open a urllib Request with retries on transient failures.
+
+    Retries on network-level errors (timeouts, connection issues) and on
+    HTTP 429/5xx responses, with a short backoff between attempts. Any
+    other HTTPError (e.g. 400/401/404) is raised immediately since retrying
+    won't help. Returns the raw response bytes.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or e.code >= 500:
+                last_exc = e
+            else:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last_exc = e
+
+        if attempt < retries:
+            time.sleep(backoff * (attempt + 1))
+
+    raise last_exc
+
+
+# ============================================================================
 # AUTH
 # ============================================================================
 
@@ -346,7 +377,7 @@ def parse_date_flexible(date_str, fallback_month=""):
 # YOUTUBE - Fetch all videos from a channel, then filter
 # ============================================================================
 
-def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
+def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usage=None):
     """Resolve a YouTube channel identifier to a channel ID.
     Handles: @handle, UC... channel ID, full URL
     """
@@ -377,8 +408,9 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
         )
         req = urllib.request.Request(url)
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
             items = data.get("items", [])
             if items:
                 ch_id = items[0].get("snippet", {}).get("channelId", "")
@@ -394,7 +426,7 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None):
     return channel_id
 
 
-def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
+def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None, usage=None):
     """Fetch all videos from a YouTube channel, filter by date range and keywords.
 
     Returns list of dicts with video data.
@@ -411,8 +443,9 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     )
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+        if usage is not None:
+            usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get channel info for {channel_id}: {e}")
@@ -457,8 +490,9 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
         req = urllib.request.Request(playlist_url)
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                pl_data = json.loads(response.read().decode("utf-8"))
+            pl_data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # playlistItems.list costs 1 unit
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Error fetching playlist: {e}")
@@ -512,8 +546,9 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
         req = urllib.request.Request(vid_url)
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                vid_data = json.loads(response.read().decode("utf-8"))
+            vid_data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Error fetching video batch: {e}")
@@ -539,10 +574,10 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
                     m = int(dur_match.group(2) or 0)
                     s = int(dur_match.group(3) or 0)
                     dur_seconds = h * 3600 + m * 60 + s
-                # Check if short by URL pattern (not available here) or duration
-                if "/shorts/" in snippet.get("thumbnails", {}).get("default", {}).get("url", ""):
-                    content_type = "Short"
-                elif dur_seconds > 0 and dur_seconds <= 60:
+                # The Data API doesn't expose an explicit "is this a Short" flag,
+                # so duration is the best available signal. YouTube Shorts can be
+                # up to 3 minutes (180s) as of the current platform rules.
+                if dur_seconds > 0 and dur_seconds <= 180:
                     content_type = "Short"
                 else:
                     content_type = "VOD"
@@ -562,12 +597,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
                 continue
 
             # Keyword filter (case-insensitive, match any keyword in title only)
-            # Strip leading # from keywords so "#POE2" also matches "POE2" or "[POE2]"
-            if keywords:
-                title_lower = title.lower()
-                # Search with original keyword AND keyword without leading #
-                if not any(kw.lower().lstrip('#') in title_lower or kw.lower() in title_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(title, keywords):
+                continue
 
             duration_formatted = format_duration(duration)
 
@@ -672,8 +703,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     profile_url = f"{SC_API_BASE}/v1/tiktok/profile?handle={urllib.parse.quote(username, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         user_data = data.get("user", {})
         user_stats = data.get("stats", {})
         subscriber_count = str(user_stats.get("followerCount", "0"))
@@ -700,8 +730,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         req = urllib.request.Request(videos_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             if progress_callback:
@@ -748,10 +777,8 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
             all_before_start = False
 
             # Keyword filter
-            if keywords:
-                caption_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in caption_lower or kw.lower() in caption_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             stats = video.get("statistics", {})
             vid_id = video.get("aweme_id", "")
@@ -843,8 +870,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     profile_url = f"{SC_API_BASE}/v1/facebook/profile?url={urllib.parse.quote(fb_url, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         page_id = data.get("id", "")
         channel_name = data.get("name", page_slug)
         follower_count = data.get("followerCount", 0)
@@ -876,8 +902,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
         req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
             if progress_callback:
                 progress_callback(f"    Facebook HTTP Error {e.code}")
@@ -923,10 +948,8 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
             all_before_start = False
 
             # Keyword filter
-            if keywords:
-                msg_lower = message.lower() if message else ""
-                if not any(kw.lower().lstrip('#') in msg_lower or kw.lower() in msg_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(message, keywords):
+                continue
 
             reaction_count = str(post.get("reactionCount", "0"))
             comment_count = str(post.get("commentCount", "0"))
@@ -1005,8 +1028,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     profile_url = f"{SC_API_BASE}/v1/instagram/profile?handle={urllib.parse.quote(username, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         user_data = data.get("user", data)
         subscriber_count = str(user_data.get("follower_count", user_data.get("followers", "0")))
         channel_name = user_data.get("full_name", user_data.get("username", username))
@@ -1034,8 +1056,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG posts: {e}")
@@ -1082,10 +1103,8 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 continue
 
             # Keyword filter
-            if keywords:
-                cap_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             # Content type
             media_type = item.get("media_type", 0)
@@ -1161,8 +1180,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         req = urllib.request.Request(reels_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG reels: {e}")
@@ -1210,10 +1228,8 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 continue
 
             # Keyword filter
-            if keywords:
-                cap_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             link = f"https://www.instagram.com/reel/{code}/" if code else ""
 
@@ -1271,8 +1287,46 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
 
 # ============================================================================
+# ACCOUNT STATUS
+# ============================================================================
+
+def get_scrapecreators_credit_balance(api_key, progress_callback=None):
+    """Get remaining ScrapeCreators API credits for this account.
+
+    Returns the credit count (int), or None if the check failed.
+    """
+    url = f"{SC_API_BASE}/v1/account/credit-balance"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key})
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+        return data.get("creditCount")
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"  Failed to get ScrapeCreators credit balance: {e}")
+        return None
+
+
+# ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+
+def matches_keywords(text, keywords):
+    """Check if text contains any of the keywords as a whole word, case-insensitive.
+
+    Uses word-boundary matching (not plain substring) so a short keyword like
+    "AI" won't match inside an unrelated word like "MAIN". A leading '#' on a
+    keyword is also stripped before matching, so "#POE2" matches "POE2" or
+    "[POE2]" in the text too.
+    """
+    if not keywords:
+        return True
+    text_lower = (text or "").lower()
+    for kw in keywords:
+        for candidate in {kw.lower(), kw.lower().lstrip('#')}:
+            if candidate and re.search(r'\b' + re.escape(candidate) + r'\b', text_lower):
+                return True
+    return False
+
 
 def format_duration(iso_duration):
     """Format ISO 8601 duration (PT1H2M3S) to total minutes.
@@ -1396,7 +1450,7 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
 # MAIN ENTRY POINT
 # ============================================================================
 
-def run_fetcher(progress_callback=None):
+def run_fetcher(progress_callback=None, progress_percent_callback=None):
     """Main entry point.
 
     Flow:
@@ -1408,11 +1462,21 @@ def run_fetcher(progress_callback=None):
     6. Write matched results to 'Result' tab starting row 4
 
     Returns:
-        dict with keys: success, total_rows, results, error
+        dict with keys: success, total_rows, results, error, yt_units_used,
+        sc_credits_remaining
     """
     def log(msg):
         if progress_callback:
             progress_callback(msg)
+
+    completed_channels = 0
+    total_channels_holder = {"total": 0}
+
+    def channel_done():
+        nonlocal completed_channels
+        completed_channels += 1
+        if progress_percent_callback:
+            progress_percent_callback(completed_channels, total_channels_holder["total"])
 
     log("Au Date Result -> Channel Content Fetcher")
     log("=" * 55)
@@ -1515,6 +1579,9 @@ def run_fetcher(progress_callback=None):
         log("  No channels found. Exiting.")
         return {"success": False, "total_rows": 0, "results": [], "error": "No channels found"}
 
+    total_channels_holder["total"] = len(channels)
+    yt_usage = {"yt_units": 0}
+
     yt_channels = [ch for ch in channels if ch["platform"] == "youtube"]
     tt_channels = [ch for ch in channels if ch["platform"] == "tiktok"]
     fb_channels = [ch for ch in channels if ch["platform"] == "facebook"]
@@ -1534,11 +1601,11 @@ def run_fetcher(progress_callback=None):
         for ch in yt_channels:
             try:
                 log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
-                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log)
+                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
                 videos, _ = fetch_youtube_channel_videos(
                     resolved_id, yt_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
+                    progress_callback=log, usage=yt_usage
                 )
                 all_results.extend(videos)
                 time.sleep(1)
@@ -1546,6 +1613,8 @@ def run_fetcher(progress_callback=None):
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
                 import traceback
                 log(f"    {traceback.format_exc()[:200]}")
+            finally:
+                channel_done()
     elif yt_channels and not yt_api_key:
         log("\n  YouTube channels found but no API key. Skipping.")
 
@@ -1564,6 +1633,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif tt_channels and not sc_api_key:
         log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1582,6 +1653,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif fb_channels and not sc_api_key:
         log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1600,6 +1673,8 @@ def run_fetcher(progress_callback=None):
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+            finally:
+                channel_done()
     elif ig_channels and not sc_api_key:
         log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
 
@@ -1626,6 +1701,11 @@ def run_fetcher(progress_callback=None):
     except Exception as e:
         log(f"  Could not save CSV backup: {e}")
 
+    # Check remaining ScrapeCreators credits
+    sc_credits_remaining = None
+    if sc_api_key:
+        sc_credits_remaining = get_scrapecreators_credit_balance(sc_api_key, progress_callback=log)
+
     # Summary
     log("\n" + "=" * 55)
     log("SUMMARY")
@@ -1642,6 +1722,11 @@ def run_fetcher(progress_callback=None):
         icon = {"youtube": "YT", "tiktok": "TT", "facebook": "FB", "instagram": "IG"}.get(p, "??")
         log(f"    {icon} {p}: {c}")
 
+    if yt_usage["yt_units"]:
+        log(f"  YouTube units used this run: ~{yt_usage['yt_units']} (Google doesn't expose remaining daily quota via API key - check Google Cloud Console)")
+    if sc_credits_remaining is not None:
+        log(f"  ScrapeCreators credits remaining: {sc_credits_remaining}")
+
     log(f"\nDone! Check the Result tab in your Google Sheet.")
 
     return {
@@ -1649,4 +1734,6 @@ def run_fetcher(progress_callback=None):
         "total_rows": len(all_results),
         "results": all_results,
         "error": None,
+        "yt_units_used": yt_usage["yt_units"],
+        "sc_credits_remaining": sc_credits_remaining,
     }

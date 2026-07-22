@@ -38,33 +38,51 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message("⏳ กำลังเริ่มทำงาน...")
         message = await interaction.original_response()
         loop = asyncio.get_running_loop()
-        last_line = {"text": ""}
+        progress = {"line": "", "percent": 0}
 
         def progress_callback(msg):
-            last_line["text"] = msg
+            progress["line"] = msg
+
+        def progress_percent_callback(completed, total):
+            progress["percent"] = int(completed / total * 100) if total else 0
 
         def done_callback(result):
             if result.get("success"):
-                text = f"✅ เสร็จสิ้น! ดึงข้อมูลได้ {result.get('total_rows', 0)} รายการ\nดูผลลัพธ์ได้ที่ Google Sheet"
+                lines = [f"✅ เสร็จสิ้น! ดึงข้อมูลได้ {result.get('total_rows', 0)} รายการ"]
+                sc_credits = result.get("sc_credits_remaining")
+                if sc_credits is not None:
+                    lines.append(f"🎟️ ScrapeCreators เครดิตคงเหลือ: {sc_credits}")
+                yt_units = result.get("yt_units_used")
+                if yt_units:
+                    lines.append(f"📺 YouTube: ใช้ไปประมาณ {yt_units} หน่วยในรอบนี้ (เช็คโควตารวมได้ที่ Google Cloud Console)")
+                lines.append("ดูผลลัพธ์ได้ที่ Google Sheet")
+                text = "\n".join(lines)
             else:
                 text = f"❌ เกิดข้อผิดพลาด: {result.get('error')}"
             asyncio.run_coroutine_threadsafe(_safe_edit(message, text), loop)
 
-        started = run_manager.start_run(progress_callback, done_callback)
+        started = run_manager.start_run(progress_callback, done_callback, progress_percent_callback)
         if not started:
             await _safe_edit(message, "⚠️ กำลังทำงานอยู่แล้ว กรุณารอสักครู่...")
             return
 
-        asyncio.create_task(_periodic_update(message, last_line))
+        asyncio.create_task(_periodic_update(message, progress))
 
 
-async def _periodic_update(message, last_line):
+def _render_bar(percent, width=20):
+    filled = int(width * percent / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+async def _periodic_update(message, progress):
     while run_manager.state["running"]:
         await asyncio.sleep(_EDIT_INTERVAL_SECONDS)
         if not run_manager.state["running"]:
             break
-        snippet = last_line["text"][-500:]
-        await _safe_edit(message, f"⏳ กำลังทำงาน...\n```{snippet}```")
+        percent = progress["percent"]
+        bar = _render_bar(percent)
+        snippet = progress["line"][-400:]
+        await _safe_edit(message, f"⏳ กำลังทำงาน... {percent}%\n{bar}\n```{snippet}```")
 
 
 async def _safe_edit(message, content):
