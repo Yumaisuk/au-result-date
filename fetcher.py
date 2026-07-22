@@ -570,12 +570,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
                 continue
 
             # Keyword filter (case-insensitive, match any keyword in title only)
-            # Strip leading # from keywords so "#POE2" also matches "POE2" or "[POE2]"
-            if keywords:
-                title_lower = title.lower()
-                # Search with original keyword AND keyword without leading #
-                if not any(kw.lower().lstrip('#') in title_lower or kw.lower() in title_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(title, keywords):
+                continue
 
             duration_formatted = format_duration(duration)
 
@@ -756,10 +752,8 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
             all_before_start = False
 
             # Keyword filter
-            if keywords:
-                caption_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in caption_lower or kw.lower() in caption_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             stats = video.get("statistics", {})
             vid_id = video.get("aweme_id", "")
@@ -931,10 +925,8 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
             all_before_start = False
 
             # Keyword filter
-            if keywords:
-                msg_lower = message.lower() if message else ""
-                if not any(kw.lower().lstrip('#') in msg_lower or kw.lower() in msg_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(message, keywords):
+                continue
 
             reaction_count = str(post.get("reactionCount", "0"))
             comment_count = str(post.get("commentCount", "0"))
@@ -1090,10 +1082,8 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 continue
 
             # Keyword filter
-            if keywords:
-                cap_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             # Content type
             media_type = item.get("media_type", 0)
@@ -1218,10 +1208,8 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 continue
 
             # Keyword filter
-            if keywords:
-                cap_lower = caption.lower() if caption else ""
-                if not any(kw.lower().lstrip('#') in cap_lower or kw.lower() in cap_lower for kw in keywords):
-                    continue
+            if keywords and not matches_keywords(caption, keywords):
+                continue
 
             link = f"https://www.instagram.com/reel/{code}/" if code else ""
 
@@ -1302,6 +1290,24 @@ def get_scrapecreators_credit_balance(api_key, progress_callback=None):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+
+def matches_keywords(text, keywords):
+    """Check if text contains any of the keywords as a whole word, case-insensitive.
+
+    Uses word-boundary matching (not plain substring) so a short keyword like
+    "AI" won't match inside an unrelated word like "MAIN". A leading '#' on a
+    keyword is also stripped before matching, so "#POE2" matches "POE2" or
+    "[POE2]" in the text too.
+    """
+    if not keywords:
+        return True
+    text_lower = (text or "").lower()
+    for kw in keywords:
+        for candidate in {kw.lower(), kw.lower().lstrip('#')}:
+            if candidate and re.search(r'\b' + re.escape(candidate) + r'\b', text_lower):
+                return True
+    return False
+
 
 def format_duration(iso_duration):
     """Format ISO 8601 duration (PT1H2M3S) to total minutes.
