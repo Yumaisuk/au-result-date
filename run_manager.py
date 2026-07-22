@@ -11,6 +11,7 @@ state = {
     "run_start": None,
     "run_id": None,
     "last_heartbeat": None,
+    "started_by": None,
 }
 
 _lock = threading.Lock()
@@ -25,7 +26,7 @@ _next_run_id = 0
 _STALE_HEARTBEAT_SECONDS = 120
 
 
-def start_run(progress_callback, done_callback, progress_percent_callback=None):
+def start_run(progress_callback, done_callback, progress_percent_callback=None, started_by=None):
     """Start a fetch run in a background thread.
 
     Returns True if a run was started, False if one is already in progress
@@ -53,6 +54,7 @@ def start_run(progress_callback, done_callback, progress_percent_callback=None):
         state["last_heartbeat"] = now
         state["results"] = None
         state["error"] = None
+        state["started_by"] = started_by
 
     def tracked_progress_callback(message):
         state["last_heartbeat"] = datetime.now().isoformat()
@@ -89,3 +91,4 @@ def reset():
     state["run_start"] = None
     state["run_id"] = None
     state["last_heartbeat"] = None
+    state["started_by"] = None
