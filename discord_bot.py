@@ -1,6 +1,7 @@
 import asyncio
 import os
 import threading
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -36,6 +37,7 @@ class ControlPanelView(discord.ui.View):
     )
     async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         started_by = interaction.user.display_name
+        started_at = datetime.now()
         await interaction.response.send_message(f"⏳ กำลังเริ่มทำงาน...\n👤 เริ่มโดย: {started_by}")
         message = await interaction.original_response()
         loop = asyncio.get_running_loop()
@@ -48,7 +50,8 @@ class ControlPanelView(discord.ui.View):
             progress["percent"] = int(completed / total * 100) if total else 0
 
         def done_callback(result):
-            lines = [f"👤 เริ่มโดย: {started_by}"]
+            elapsed = _format_elapsed(datetime.now() - started_at)
+            lines = [f"👤 เริ่มโดย: {started_by}", f"⏱️ ใช้เวลาทั้งหมด: {elapsed}"]
             if result.get("success"):
                 lines.append(f"✅ เสร็จสิ้น! ดึงข้อมูลได้ {result.get('total_rows', 0)} รายการ")
                 sc_credits = result.get("sc_credits_remaining")
@@ -70,7 +73,7 @@ class ControlPanelView(discord.ui.View):
             await _safe_edit(message, f"⚠️ กำลังทำงานอยู่แล้ว (เริ่มโดย: {current_runner}) กรุณารอสักครู่...")
             return
 
-        asyncio.create_task(_periodic_update(message, progress, started_by))
+        asyncio.create_task(_periodic_update(message, progress, started_by, started_at))
 
 
 def _render_bar(percent, width=20):
@@ -78,7 +81,15 @@ def _render_bar(percent, width=20):
     return "█" * filled + "░" * (width - filled)
 
 
-async def _periodic_update(message, progress, started_by):
+def _format_elapsed(delta):
+    total_seconds = int(delta.total_seconds())
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes} นาที {seconds} วินาที"
+    return f"{seconds} วินาที"
+
+
+async def _periodic_update(message, progress, started_by, started_at):
     while run_manager.state["running"]:
         await asyncio.sleep(_EDIT_INTERVAL_SECONDS)
         if not run_manager.state["running"]:
@@ -86,9 +97,11 @@ async def _periodic_update(message, progress, started_by):
         percent = progress["percent"]
         bar = _render_bar(percent)
         snippet = progress["line"][-400:]
+        elapsed = _format_elapsed(datetime.now() - started_at)
         await _safe_edit(
             message,
-            f"👤 เริ่มโดย: {started_by}\n⏳ กำลังทำงาน... {percent}%\n{bar}\n```{snippet}```",
+            f"👤 เริ่มโดย: {started_by}\n⏱️ เวลาที่ใช้ไปแล้ว: {elapsed}\n"
+            f"⏳ กำลังทำงาน... {percent}%\n{bar}\n```{snippet}```",
         )
 
 
