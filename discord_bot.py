@@ -1,10 +1,11 @@
 import asyncio
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 import run_manager
 
@@ -13,6 +14,8 @@ SPREADSHEET_URL = (
     "1_lHNg3BbGKdyN4SfHhymjsAHNZ2BW8e36zVw1U0e3SM/edit?gid=0#gid=0"
 )
 _EDIT_INTERVAL_SECONDS = 5
+_CLEANUP_CHANNEL_ID = int(os.environ.get("DISCORD_CLEANUP_CHANNEL_ID", "1529403389148921916"))
+_CLEANUP_MAX_AGE_DAYS = 7
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
@@ -121,6 +124,30 @@ async def panel(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=ControlPanelView())
 
 
+def _should_delete_message(message):
+    if message.author != client.user:
+        return False
+    if message.pinned:
+        return False
+    if message.components:
+        return False
+    return True
+
+
+@tasks.loop(hours=24)
+async def cleanup_old_messages():
+    channel = client.get_channel(_CLEANUP_CHANNEL_ID)
+    if channel is None:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_CLEANUP_MAX_AGE_DAYS)
+    try:
+        deleted = await channel.purge(limit=500, before=cutoff, check=_should_delete_message)
+        if deleted:
+            print(f"Cleanup: deleted {len(deleted)} old status message(s) in channel {_CLEANUP_CHANNEL_ID}")
+    except discord.HTTPException as e:
+        print(f"Cleanup: failed to purge old messages: {e}")
+
+
 @client.event
 async def on_ready():
     client.add_view(ControlPanelView())
@@ -131,6 +158,8 @@ async def on_ready():
         await tree.sync(guild=guild)
     else:
         await tree.sync()
+    if not cleanup_old_messages.is_running():
+        cleanup_old_messages.start()
     print(f"Discord bot logged in as {client.user}")
 
 
