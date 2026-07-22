@@ -11,8 +11,13 @@ a Discord bot panel or from the web UI.
   a Google Sheet via the Sheets API (see `fetcher.py`).
 - YouTube uses the official YouTube Data API. TikTok, Facebook, and Instagram
   use the [ScrapeCreators](https://scrapecreators.com/) API.
-- `run_manager.py` holds the shared run state (with stale-run detection) used
-  by both trigger points below, so only one fetch can run at a time.
+- `run_manager.py` holds the shared run state used by both trigger points
+  below, so only one fetch can run at a time. A run is only reclaimed as
+  "stuck" after it stops reporting progress for 2 minutes (not just because
+  it's been running a while - fetching many channels can legitimately take
+  longer than that).
+- All external API calls retry automatically on timeouts/network errors and
+  on 429/5xx responses (see `urlopen_with_retry` in `fetcher.py`).
 - **Discord bot** (`discord_bot.py`): run `/panel` in your server to post a
   message with a "เริ่มดึงข้อมูล" button (starts a run, edits the message with
   progress and the final result) and a "เปิด Google Sheet" link button.
@@ -42,6 +47,17 @@ a Discord bot panel or from the web UI.
 4. In Discord, invite the bot with the `applications.commands` and `bot`
    scopes (Send Messages, Embed Links permissions), then run `/panel` in the
    channel where you want the control panel to appear.
+
+## Testing
+
+Unit tests cover the pure/deterministic helpers in `fetcher.py` (date
+parsing, channel ID extraction, keyword matching, duration formatting) -
+no network or Google Sheets access required.
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
 
 ## Deployment
 

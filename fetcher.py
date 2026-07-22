@@ -20,6 +20,37 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 # ============================================================================
+# HTTP HELPERS
+# ============================================================================
+
+def urlopen_with_retry(req, timeout=15, retries=2, backoff=1.5):
+    """Open a urllib Request with retries on transient failures.
+
+    Retries on network-level errors (timeouts, connection issues) and on
+    HTTP 429/5xx responses, with a short backoff between attempts. Any
+    other HTTPError (e.g. 400/401/404) is raised immediately since retrying
+    won't help. Returns the raw response bytes.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or e.code >= 500:
+                last_exc = e
+            else:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last_exc = e
+
+        if attempt < retries:
+            time.sleep(backoff * (attempt + 1))
+
+    raise last_exc
+
+
+# ============================================================================
 # AUTH
 # ============================================================================
 
@@ -377,8 +408,7 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usag
         )
         req = urllib.request.Request(url)
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
             if usage is not None:
                 usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
             items = data.get("items", [])
@@ -413,8 +443,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     )
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         if usage is not None:
             usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
     except Exception as e:
@@ -461,8 +490,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
         req = urllib.request.Request(playlist_url)
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                pl_data = json.loads(response.read().decode("utf-8"))
+            pl_data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
             if usage is not None:
                 usage["yt_units"] = usage.get("yt_units", 0) + 1  # playlistItems.list costs 1 unit
         except Exception as e:
@@ -518,8 +546,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
         req = urllib.request.Request(vid_url)
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                vid_data = json.loads(response.read().decode("utf-8"))
+            vid_data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
             if usage is not None:
                 usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
         except Exception as e:
@@ -676,8 +703,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     profile_url = f"{SC_API_BASE}/v1/tiktok/profile?handle={urllib.parse.quote(username, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         user_data = data.get("user", {})
         user_stats = data.get("stats", {})
         subscriber_count = str(user_stats.get("followerCount", "0"))
@@ -704,8 +730,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         req = urllib.request.Request(videos_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8") if e.fp else ""
             if progress_callback:
@@ -845,8 +870,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     profile_url = f"{SC_API_BASE}/v1/facebook/profile?url={urllib.parse.quote(fb_url, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         page_id = data.get("id", "")
         channel_name = data.get("name", page_slug)
         follower_count = data.get("followerCount", 0)
@@ -878,8 +902,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
         req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
             if progress_callback:
                 progress_callback(f"    Facebook HTTP Error {e.code}")
@@ -1005,8 +1028,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     profile_url = f"{SC_API_BASE}/v1/instagram/profile?handle={urllib.parse.quote(username, safe='')}"
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         user_data = data.get("user", data)
         subscriber_count = str(user_data.get("follower_count", user_data.get("followers", "0")))
         channel_name = user_data.get("full_name", user_data.get("username", username))
@@ -1034,8 +1056,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         req = urllib.request.Request(posts_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG posts: {e}")
@@ -1159,8 +1180,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         req = urllib.request.Request(reels_url, headers=sc_headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG reels: {e}")
@@ -1278,8 +1298,7 @@ def get_scrapecreators_credit_balance(api_key, progress_callback=None):
     url = f"{SC_API_BASE}/v1/account/credit-balance"
     req = urllib.request.Request(url, headers={"x-api-key": api_key})
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         return data.get("creditCount")
     except Exception as e:
         if progress_callback:
