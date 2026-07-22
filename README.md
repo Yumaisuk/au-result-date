@@ -7,8 +7,11 @@ a Discord bot panel or from the web UI.
 
 ## How it works
 
-- Channel list, search config (date range, keywords), and API keys are read from
-  a Google Sheet via the Sheets API (see `fetcher.py`).
+- Channel list and search config (date range, keywords) are read from a
+  Google Sheet via the Sheets API (see `fetcher.py`). API keys are read
+  from environment variables first; the Sheet's API tab is only used as a
+  fallback and is entirely optional (safe to hide or delete it, e.g. to
+  keep the keys out of a Sheet that gets shared around).
 - YouTube uses the official YouTube Data API. TikTok, Facebook, and Instagram
   use the [ScrapeCreators](https://scrapecreators.com/) API.
 - `run_manager.py` holds the shared run state used by both trigger points
@@ -35,7 +38,8 @@ a Discord bot panel or from the web UI.
    - `GOOGLE_SERVICE_ACCOUNT_JSON` (full service account JSON, for cloud deploys)
      or `GOOGLE_SERVICE_ACCOUNT_FILE` (path to a service account key file, for local dev)
    - `SPREADSHEET_ID` (optional — defaults to the configured sheet)
-   - `SCRAPE_CREATORS_API_KEY` (optional fallback if the key isn't in the sheet's API tab)
+   - `YOUTUBE_API_KEY` and `SCRAPE_CREATORS_API_KEY` (API keys - if unset,
+     falls back to reading the Sheet's API tab, which is otherwise optional)
    - `DISCORD_BOT_TOKEN` (Discord bot token — omit to run without the Discord bot)
    - `DISCORD_GUILD_ID` (optional — your server's ID, makes the `/panel` slash
      command sync instantly instead of waiting up to an hour for a global sync)

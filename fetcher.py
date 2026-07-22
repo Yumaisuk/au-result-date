@@ -96,24 +96,29 @@ def get_sheet_metadata(sheets_service, progress_callback=None):
 
 
 def read_api_keys(sheets_service, api_tab_name, progress_callback=None):
-    """Read API keys from the API tab by position.
-    C2=YouTube (Official), C3-C5=legacy (no longer used), C6=ScrapeCreators
-    Also supports SCRAPE_CREATORS_API_KEY env var.
+    """Get the YouTube and ScrapeCreators API keys.
+
+    Environment variables (YOUTUBE_API_KEY, SCRAPE_CREATORS_API_KEY) take
+    priority. The API tab in the Sheet (C2=YouTube, C6=ScrapeCreators) is
+    only used as a fallback for whichever key isn't set via env var, and is
+    skipped entirely if no API tab was found (e.g. it's been deleted).
     """
-    range_str = f"'{api_tab_name}'!C2:C6"
-    result = sheets_service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=range_str
-    ).execute()
-    rows = result.get("values", [])
+    yt_key = os.environ.get("YOUTUBE_API_KEY", "")
+    sc_key = os.environ.get("SCRAPE_CREATORS_API_KEY", "")
 
-    yt_key = rows[0][0].strip() if len(rows) > 0 and len(rows[0]) > 0 else ""
-    # C3-C5 are legacy keys (omkar.cloud TikTok, RapidAPI Facebook/Instagram) — no longer used
-    sc_key = rows[4][0].strip() if len(rows) > 4 and len(rows[4]) > 0 else ""
+    if (not yt_key or not sc_key) and api_tab_name:
+        range_str = f"'{api_tab_name}'!C2:C6"
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=range_str
+        ).execute()
+        rows = result.get("values", [])
 
-    # Fallback: env var for ScrapeCreators key
-    if not sc_key:
-        sc_key = os.environ.get("SCRAPE_CREATORS_API_KEY", "")
+        if not yt_key:
+            yt_key = rows[0][0].strip() if len(rows) > 0 and len(rows[0]) > 0 else ""
+        # C3-C5 are legacy keys (omkar.cloud TikTok, RapidAPI Facebook/Instagram) — no longer used
+        if not sc_key:
+            sc_key = rows[4][0].strip() if len(rows) > 4 and len(rows[4]) > 0 else ""
 
     if progress_callback:
         progress_callback(f"  YouTube Key (Official): {'Found' if yt_key else 'NOT FOUND'}")
@@ -1528,11 +1533,11 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         elif "kol" in title_lower or "channel" in title_lower or title_lower == "date":
             channel_tab_name = title
 
-    # Step 2: Fallback by tab order if name matching missed any
-    # Expected tab order: API → Result → Channel KOLs (Date)
-    if not api_tab_name and len(sheets) >= 1:
-        api_tab_name = sheets[0]["properties"]["title"]
-        log(f"  Fallback: API tab → #{1} '{api_tab_name}'")
+    # Step 2: Fallback by tab order if name matching missed any.
+    # The API tab is optional (API keys can come from environment variables
+    # instead), so it deliberately has no position-based fallback - guessing
+    # a position would misfire once that tab is removed and shift everyone
+    # else's index.
     if not result_tab_name and len(sheets) >= 2:
         result_tab_name = sheets[1]["properties"]["title"]
         log(f"  Fallback: Result tab → #{2} '{result_tab_name}'")
@@ -1540,7 +1545,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         channel_tab_name = sheets[2]["properties"]["title"]
         log(f"  Fallback: Channel tab → #{3} '{channel_tab_name}'")
 
-    log(f"  API tab: '{api_tab_name}'")
+    log(f"  API tab: '{api_tab_name}'" if api_tab_name else "  API tab: not found (using environment variables for API keys)")
     log(f"  Channel KOLs tab: '{channel_tab_name}'")
     log(f"  Result tab: '{result_tab_name}'")
 
