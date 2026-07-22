@@ -547,10 +547,10 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
                     m = int(dur_match.group(2) or 0)
                     s = int(dur_match.group(3) or 0)
                     dur_seconds = h * 3600 + m * 60 + s
-                # Check if short by URL pattern (not available here) or duration
-                if "/shorts/" in snippet.get("thumbnails", {}).get("default", {}).get("url", ""):
-                    content_type = "Short"
-                elif dur_seconds > 0 and dur_seconds <= 60:
+                # The Data API doesn't expose an explicit "is this a Short" flag,
+                # so duration is the best available signal. YouTube Shorts can be
+                # up to 3 minutes (180s) as of the current platform rules.
+                if dur_seconds > 0 and dur_seconds <= 180:
                     content_type = "Short"
                 else:
                     content_type = "VOD"
