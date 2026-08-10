@@ -328,6 +328,24 @@ def parse_ddmmyy(date_str):
     return None
 
 
+def swap_dates_if_needed(start_date, end_date):
+    """Swap two "%d/%m/%y" date strings if start is after end.
+
+    Compares as actual dates, not raw strings - lexicographic comparison
+    sorts by day-of-month first and misorders across month boundaries
+    (e.g. "28/07/26" > "05/08/26" even though July 28 comes first), which
+    would silently reverse a valid range into a range nothing can match.
+
+    Returns (start_date, end_date, was_swapped). If either date fails to
+    parse, returns the inputs unchanged.
+    """
+    start_dt = parse_ddmmyy(start_date)
+    end_dt = parse_ddmmyy(end_date)
+    if start_dt and end_dt and start_dt > end_dt:
+        return end_date, start_date, True
+    return start_date, end_date, False
+
+
 def parse_date_flexible(date_str, fallback_month=""):
     """Parse date from various formats.
     Supports: DD/M/YYYY, DD/MM/YYYY, YYYY-MM-DD, "15 May 2026", "15" + "May 2026"
@@ -1383,14 +1401,22 @@ def format_duration(iso_duration):
 
 
 def format_published_date(published):
-    """Format ISO date string to dd/mm/yy."""
+    """Format ISO date string to dd/mm/yy, converted to Bangkok time.
+
+    YouTube's publishedAt is UTC; every other platform's timestamp is
+    already converted to BANGKOK_TZ before reaching here (see the tiktok/
+    facebook/instagram fetchers). Without this conversion, anything
+    published between 17:00-23:59 UTC (00:00-06:59 the next day in
+    Bangkok) would be filed under the wrong calendar date and could fall
+    outside the configured date range entirely.
+    """
     if not published:
         return ""
     if len(published) == 10 and published.count("-") == 2:
         return published
     try:
         dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
-        return dt.strftime("%d/%m/%y")
+        return dt.astimezone(BANGKOK_TZ).strftime("%d/%m/%y")
     except:
         return published[:10] if len(published) >= 10 else published
 
@@ -1486,7 +1512,7 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
 # MAIN ENTRY POINT
 # ============================================================================
 
-def run_fetcher(progress_callback=None, progress_percent_callback=None):
+def run_fetcher(progress_callback=None, progress_percent_callback=None, should_continue=None):
     """Main entry point.
 
     Flow:
@@ -1496,6 +1522,13 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
     4. Read API keys from 'API' tab
     5. For each channel, fetch all content and filter by date + keywords
     6. Write matched results to 'Result' tab starting row 4
+
+    should_continue: optional callable checked right before writing to the
+    Sheet. If it returns False, the write is skipped entirely - used by
+    run_manager to stop an orphaned/reclaimed run (its heartbeat went stale
+    and a newer run took over, or it was force-reset) from overwriting the
+    Sheet with stale results after the fact. A run that's still current
+    when the fetch loops finish always passes this check.
 
     Returns:
         dict with keys: success, total_rows, results, error, yt_units_used,
@@ -1595,9 +1628,8 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         log("  ERROR: Date range not configured in Result tab (A2:D2)!")
         return {"success": False, "total_rows": 0, "results": [], "error": "Date range not configured"}
 
-    # Swap dates if start > end
-    if start_date > end_date:
-        start_date, end_date = end_date, start_date
+    start_date, end_date, was_swapped = swap_dates_if_needed(start_date, end_date)
+    if was_swapped:
         log(f"  Note: Swapped dates so start <= end: {start_date} to {end_date}")
 
     if not keywords:
@@ -1726,6 +1758,10 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
                 channel_done()
     elif ig_channels and not sc_api_key:
         log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
+
+    if should_continue is not None and not should_continue():
+        log("\n  Aborting: this run was superseded (reclaimed as stale, or reset) - not writing to the Sheet.")
+        return {"success": False, "total_rows": len(all_results), "results": all_results, "error": "Superseded by a newer run"}
 
     # Write results
     log(f"\nWriting {len(all_results)} results to Google Sheet...")

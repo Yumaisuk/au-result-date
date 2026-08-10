@@ -109,7 +109,8 @@ class ControlPanelView(discord.ui.View):
             await _safe_edit(message, f"⚠️ กำลังทำงานอยู่แล้ว (เริ่มโดย: {current_runner}) กรุณารอสักครู่...")
             return
 
-        asyncio.create_task(_periodic_update(message, progress, started_by, started_at))
+        my_run_id = run_manager.state["run_id"]
+        asyncio.create_task(_periodic_update(message, progress, started_by, started_at, my_run_id))
         asyncio.create_task(_repost_panel(channel))
 
 
@@ -126,10 +127,13 @@ def _format_elapsed(delta):
     return f"{seconds} วินาที"
 
 
-async def _periodic_update(message, progress, started_by, started_at):
-    while run_manager.state["running"]:
+async def _periodic_update(message, progress, started_by, started_at, my_run_id):
+    def is_my_run_active():
+        return run_manager.state["running"] and run_manager.state["run_id"] == my_run_id
+
+    while is_my_run_active():
         await asyncio.sleep(_EDIT_INTERVAL_SECONDS)
-        if not run_manager.state["running"]:
+        if not is_my_run_active():
             break
         percent = progress["percent"]
         bar = _render_bar(percent)
