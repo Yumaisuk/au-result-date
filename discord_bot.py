@@ -21,11 +21,6 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# Tracks the currently-active panel message per channel, so it can be
-# deleted and reposted at the bottom after each run instead of piling up.
-_panel_messages = {}
-
-
 def _panel_embed():
     return discord.Embed(
         title="📅 Au Result Date",
@@ -33,16 +28,28 @@ def _panel_embed():
     )
 
 
+def _is_panel_message(message):
+    # The panel is the only bot message with buttons - status/progress
+    # messages are plain text - so this is an unambiguous signature.
+    return message.author == client.user and message.components and not message.pinned
+
+
 async def _repost_panel(channel):
-    old = _panel_messages.get(channel.id)
-    if old is not None:
-        try:
-            await old.delete()
-        except discord.HTTPException:
-            pass
+    # Scan the channel itself for stray panel message(s) rather than relying
+    # on in-memory tracking, which resets to empty on every bot restart
+    # (e.g. a Railway redeploy) and would otherwise leave the old panel
+    # behind forever while a new one keeps getting posted alongside it.
     try:
-        new_message = await channel.send(embed=_panel_embed(), view=ControlPanelView())
-        _panel_messages[channel.id] = new_message
+        async for old_message in channel.history(limit=50):
+            if _is_panel_message(old_message):
+                try:
+                    await old_message.delete()
+                except discord.HTTPException:
+                    pass
+    except discord.HTTPException:
+        pass
+    try:
+        await channel.send(embed=_panel_embed(), view=ControlPanelView())
     except discord.HTTPException:
         pass
 
@@ -155,8 +162,11 @@ async def _safe_edit(message, content):
 
 @tree.command(name="panel", description="แสดงปุ่มควบคุมสำหรับ Au Result Date")
 async def panel(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=_panel_embed(), view=ControlPanelView())
-    _panel_messages[interaction.channel_id] = await interaction.original_response()
+    # Ephemeral - only the command invoker sees this; the actual panel is
+    # posted into the channel itself by _repost_panel below.
+    await interaction.response.defer(ephemeral=True)
+    await _repost_panel(interaction.channel)
+    await interaction.followup.send("โพสต์แผงควบคุมแล้ว ✅", ephemeral=True)
 
 
 def _should_delete_message(message):

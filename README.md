@@ -33,9 +33,11 @@ a Discord bot panel or from the web UI.
 - **Discord bot** (`discord_bot.py`): run `/panel` in your server to post a
   message with a "เริ่มดึงข้อมูล" button (starts a run, edits the message with
   progress and the final result) and a "เปิด Google Sheet" link button. Every
-  time a run is started, the control panel message is deleted and reposted
-  at the bottom of the channel, so it's always the most recent message and
-  easy to find for the next run.
+  time a run is started, the panel is reposted at the bottom of the channel
+  so it's always the most recent message. Finding the old panel to remove
+  is done by scanning the channel's own recent history (any bot message
+  with buttons) rather than in-memory tracking, so it stays correct even
+  across a bot restart/redeploy instead of leaving a stray duplicate behind.
 - To keep the channel from filling up with old run status messages, the bot
   automatically purges its own status messages older than 7 days once a day.
   It never deletes pinned messages or the `/panel` control panel message
