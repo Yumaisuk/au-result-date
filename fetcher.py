@@ -454,13 +454,13 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get channel info for {channel_id}: {e}")
-        return [], {}
+        return [], {"had_error": True}
 
     items = data.get("items", [])
     if not items:
         if progress_callback:
             progress_callback(f"    Channel not found: {channel_id}")
-        return [], {}
+        return [], {"had_error": True}
 
     channel_info = items[0]
     channel_title = channel_info.get("snippet", {}).get("title", "")
@@ -470,9 +470,10 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     if not uploads_playlist:
         if progress_callback:
             progress_callback(f"    No uploads playlist for {channel_id}")
-        return [], {"channel_name": channel_title, "subscribers": subscriber_count}
+        return [], {"channel_name": channel_title, "subscribers": subscriber_count, "had_error": True}
 
     channel_meta = {"channel_name": channel_title, "subscribers": subscriber_count}
+    had_error = False
 
     # Step 2: Collect video IDs from uploads playlist (paginated)
     # Step 3 will fetch details in batches — we collect IDs first,
@@ -499,6 +500,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if usage is not None:
                 usage["yt_units"] = usage.get("yt_units", 0) + 1  # playlistItems.list costs 1 unit
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Error fetching playlist: {e}")
             break
@@ -508,7 +510,10 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if vid_id:
                 video_ids.append(vid_id)
                 # Use playlist item date as approximate cutoff
-                # If the item was added before start_date, the video is likely too old
+                # If the item was added before start_date, the video is likely too old.
+                # Compare as actual dates, not "%d/%m/%y" strings — lexicographic
+                # comparison of day-first strings is wrong across month boundaries
+                # (e.g. "03/09/26" < "25/08/26" even though Sept 3 is later).
                 if start_date:
                     item_date_str = item.get("snippet", {}).get("publishedAt", "")
                     if item_date_str:
@@ -516,7 +521,9 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
                             item_date = datetime.fromisoformat(
                                 item_date_str.replace("Z", "+00:00")
                             ).astimezone(BANGKOK_TZ).strftime("%d/%m/%y")
-                            if item_date < str(start_date):
+                            item_dt = parse_ddmmyy(item_date)
+                            start_dt_cutoff = parse_ddmmyy(start_date)
+                            if item_dt and start_dt_cutoff and item_dt < start_dt_cutoff:
                                 reached_old = True
                                 break
                         except (ValueError, TypeError):
@@ -555,6 +562,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if usage is not None:
                 usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Error fetching video batch: {e}")
             continue
@@ -663,6 +671,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     if progress_callback:
         progress_callback(f"    Matched {len(matched_videos)} videos from {channel_title}")
 
+    channel_meta["had_error"] = had_error
     return matched_videos, channel_meta
 
 
@@ -726,6 +735,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     max_cursor = ""
     page_num = 0
     max_pages = 3  # limit pages to conserve credits
+    had_error = False
 
     while page_num < max_pages:
         params = f"handle={urllib.parse.quote(username, safe='')}"
@@ -737,11 +747,13 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         try:
             data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
+            had_error = True
             error_body = e.read().decode("utf-8") if e.fp else ""
             if progress_callback:
                 progress_callback(f"    TikTok HTTP Error {e.code}: {error_body[:200]}")
             break
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    TikTok Error fetching videos for @{username}: {e}")
             break
@@ -838,7 +850,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     if progress_callback:
         progress_callback(f"    Matched {len(matched_videos)} videos from @{username}")
 
-    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count}
+    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
     return matched_videos, channel_meta
 
 
@@ -894,6 +906,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     cursor = ""
     page_num = 0
     max_pages = 10  # ~30 posts max per channel (3 posts/page × 10 pages)
+    had_error = False
 
     while page_num < max_pages:
         params = []
@@ -909,10 +922,12 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
         try:
             data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except urllib.error.HTTPError as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Facebook HTTP Error {e.code}")
             break
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Facebook Error for {page_slug}: {e}")
             break
@@ -1002,7 +1017,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     if progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} posts from {channel_name}")
 
-    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count}
+    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
     return matched_posts, channel_meta
 
 
@@ -1047,6 +1062,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
     matched_posts = []
     seen_codes = set()  # deduplicate posts vs reels
+    had_error = False
 
     # ---- Fetch Posts ----
     next_max_id = ""
@@ -1063,6 +1079,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         try:
             data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG posts: {e}")
             break
@@ -1187,6 +1204,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
         try:
             data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
         except Exception as e:
+            had_error = True
             if progress_callback:
                 progress_callback(f"    Failed to fetch IG reels: {e}")
             break
@@ -1287,7 +1305,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     if progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} items from @{username}")
 
-    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count}
+    channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
     return matched_posts, channel_meta
 
 
@@ -1599,6 +1617,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
     log(f"    Instagram: {len(ig_channels)}")
 
     all_results = []
+    failed_channels = {"youtube": [], "tiktok": [], "facebook": [], "instagram": []}
 
     # ---- Fetch YouTube channels ----
     if yt_channels and yt_api_key:
@@ -1607,17 +1626,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
             try:
                 log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
                 resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
-                videos, _ = fetch_youtube_channel_videos(
+                videos, meta = fetch_youtube_channel_videos(
                     resolved_id, yt_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log, usage=yt_usage
                 )
                 all_results.extend(videos)
+                if meta.get("had_error"):
+                    failed_channels["youtube"].append(ch["channel_name"])
                 time.sleep(1)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
                 import traceback
                 log(f"    {traceback.format_exc()[:200]}")
+                failed_channels["youtube"].append(ch["channel_name"])
             finally:
                 channel_done()
     elif yt_channels and not yt_api_key:
@@ -1629,15 +1651,18 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         for ch in tt_channels:
             try:
                 log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
-                videos, _ = fetch_tiktok_channel_videos(
+                videos, meta = fetch_tiktok_channel_videos(
                     ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(videos)
+                if meta.get("had_error"):
+                    failed_channels["tiktok"].append(ch["channel_name"])
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+                failed_channels["tiktok"].append(ch["channel_name"])
             finally:
                 channel_done()
     elif tt_channels and not sc_api_key:
@@ -1649,15 +1674,18 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         for ch in fb_channels:
             try:
                 log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
-                posts, _ = fetch_facebook_channel_posts(
+                posts, meta = fetch_facebook_channel_posts(
                     ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(posts)
+                if meta.get("had_error"):
+                    failed_channels["facebook"].append(ch["channel_name"])
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+                failed_channels["facebook"].append(ch["channel_name"])
             finally:
                 channel_done()
     elif fb_channels and not sc_api_key:
@@ -1669,15 +1697,18 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         for ch in ig_channels:
             try:
                 log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
-                posts, _ = fetch_instagram_channel_posts(
+                posts, meta = fetch_instagram_channel_posts(
                     ch["channel_id"], sc_api_key,
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
                 all_results.extend(posts)
+                if meta.get("had_error"):
+                    failed_channels["instagram"].append(ch["channel_name"])
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
+                failed_channels["instagram"].append(ch["channel_name"])
             finally:
                 channel_done()
     elif ig_channels and not sc_api_key:
@@ -1732,6 +1763,13 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
     if sc_credits_remaining is not None:
         log(f"  ScrapeCreators credits remaining: {sc_credits_remaining}")
 
+    total_failed = sum(len(v) for v in failed_channels.values())
+    if total_failed:
+        log(f"\n  WARNING: {total_failed} channel(s) failed to fetch:")
+        for platform, names in failed_channels.items():
+            if names:
+                log(f"    {platform}: {', '.join(names)}")
+
     log(f"\nDone! Check the Result tab in your Google Sheet.")
 
     return {
@@ -1741,4 +1779,5 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         "error": None,
         "yt_units_used": yt_usage["yt_units"],
         "sc_credits_remaining": sc_credits_remaining,
+        "failed_channels": failed_channels,
     }

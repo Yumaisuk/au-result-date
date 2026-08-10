@@ -63,6 +63,13 @@ class ControlPanelView(discord.ui.View):
                 yt_units = result.get("yt_units_used")
                 if yt_units:
                     lines.append(f"📺 YouTube: ใช้ไปประมาณ {yt_units} หน่วยในรอบนี้ (เช็คโควตารวมได้ที่ Google Cloud Console)")
+                failed_channels = result.get("failed_channels") or {}
+                failed_names = [name for names in failed_channels.values() for name in names]
+                if failed_names:
+                    platform_labels = {"youtube": "YouTube", "tiktok": "TikTok", "facebook": "Facebook", "instagram": "Instagram"}
+                    parts = [f"{platform_labels.get(p, p)} ({len(names)}): {', '.join(names)}"
+                              for p, names in failed_channels.items() if names]
+                    lines.append(f"⚠️ ดึงข้อมูลไม่สำเร็จ {len(failed_names)} ช่อง — " + " | ".join(parts))
                 lines.append("ดูผลลัพธ์ได้ที่ Google Sheet")
             else:
                 lines.append(f"❌ เกิดข้อผิดพลาด: {result.get('error')}")
