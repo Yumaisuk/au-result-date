@@ -1340,13 +1340,26 @@ def matches_keywords(text, keywords):
     "AI" won't match inside an unrelated word like "MAIN". A leading '#' on a
     keyword is also stripped before matching, so "#POE2" matches "POE2" or
     "[POE2]" in the text too.
+
+    Campaign keywords are often written as one concatenated word (e.g.
+    "gangstarmiragecity") but appear in captions with spaces ("Gangstar
+    Mirage City"), so as a fallback we also compare with whitespace
+    stripped from both sides. Restricted to keywords of 8+ characters
+    (after stripping spaces) to avoid short keywords matching inside
+    unrelated concatenated substrings once boundaries are gone.
     """
     if not keywords:
         return True
     text_lower = (text or "").lower()
+    text_nospace = re.sub(r'\s+', '', text_lower)
     for kw in keywords:
         for candidate in {kw.lower(), kw.lower().lstrip('#')}:
-            if candidate and re.search(r'\b' + re.escape(candidate) + r'\b', text_lower):
+            if not candidate:
+                continue
+            if re.search(r'\b' + re.escape(candidate) + r'\b', text_lower):
+                return True
+            candidate_nospace = re.sub(r'\s+', '', candidate)
+            if len(candidate_nospace) >= 8 and candidate_nospace in text_nospace:
                 return True
     return False
 
