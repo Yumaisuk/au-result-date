@@ -21,6 +21,31 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+# Tracks the currently-active panel message per channel, so it can be
+# deleted and reposted at the bottom after each run instead of piling up.
+_panel_messages = {}
+
+
+def _panel_embed():
+    return discord.Embed(
+        title="📅 Au Result Date",
+        description="กดปุ่มด้านล่างเพื่อเริ่มดึงข้อมูล หรือเปิดดู Google Sheet",
+    )
+
+
+async def _repost_panel(channel):
+    old = _panel_messages.get(channel.id)
+    if old is not None:
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            pass
+    try:
+        new_message = await channel.send(embed=_panel_embed(), view=ControlPanelView())
+        _panel_messages[channel.id] = new_message
+    except discord.HTTPException:
+        pass
+
 
 class ControlPanelView(discord.ui.View):
     def __init__(self):
@@ -41,6 +66,7 @@ class ControlPanelView(discord.ui.View):
     async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         started_by = interaction.user.display_name
         started_at = datetime.now()
+        channel = interaction.channel
         await interaction.response.send_message(f"⏳ กำลังเริ่มทำงาน...\n👤 เริ่มโดย: {started_by}")
         message = await interaction.original_response()
         loop = asyncio.get_running_loop()
@@ -84,6 +110,7 @@ class ControlPanelView(discord.ui.View):
             return
 
         asyncio.create_task(_periodic_update(message, progress, started_by, started_at))
+        asyncio.create_task(_repost_panel(channel))
 
 
 def _render_bar(percent, width=20):
@@ -124,11 +151,8 @@ async def _safe_edit(message, content):
 
 @tree.command(name="panel", description="แสดงปุ่มควบคุมสำหรับ Au Result Date")
 async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📅 Au Result Date",
-        description="กดปุ่มด้านล่างเพื่อเริ่มดึงข้อมูล หรือเปิดดู Google Sheet",
-    )
-    await interaction.response.send_message(embed=embed, view=ControlPanelView())
+    await interaction.response.send_message(embed=_panel_embed(), view=ControlPanelView())
+    _panel_messages[interaction.channel_id] = await interaction.original_response()
 
 
 def _should_delete_message(message):

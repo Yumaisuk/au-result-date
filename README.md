@@ -23,7 +23,10 @@ a Discord bot panel or from the web UI.
   on 429/5xx responses (see `urlopen_with_retry` in `fetcher.py`).
 - **Discord bot** (`discord_bot.py`): run `/panel` in your server to post a
   message with a "เริ่มดึงข้อมูล" button (starts a run, edits the message with
-  progress and the final result) and a "เปิด Google Sheet" link button.
+  progress and the final result) and a "เปิด Google Sheet" link button. Every
+  time a run is started, the control panel message is deleted and reposted
+  at the bottom of the channel, so it's always the most recent message and
+  easy to find for the next run.
 - To keep the channel from filling up with old run status messages, the bot
   automatically purges its own status messages older than 7 days once a day.
   It never deletes pinned messages or the `/panel` control panel message
