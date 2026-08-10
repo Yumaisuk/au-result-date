@@ -146,6 +146,16 @@ def test_matches_keywords_none_text():
     assert matches_keywords(None, []) is True
 
 
+def test_matches_keywords_concatenated_keyword_matches_spaced_text():
+    # Campaign keyword written as one word, but the caption spells it with spaces
+    assert matches_keywords("Just Like GTA: Gangstar Mirage City", ["gangstarmiragecity"]) is True
+
+
+def test_matches_keywords_short_keyword_still_requires_word_boundary():
+    # The concatenated-match fallback must not reintroduce false positives for short keywords
+    assert matches_keywords("this is the MAIN feature", ["AI"]) is False
+
+
 # ---- format_duration ----
 
 def test_format_duration_minutes_and_seconds_round_up():
