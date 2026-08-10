@@ -12,6 +12,7 @@ from fetcher import (
     matches_keywords,
     parse_ddmmyy,
     parse_date_flexible,
+    swap_dates_if_needed,
 )
 
 
@@ -185,12 +186,38 @@ def test_format_published_date_iso_datetime():
     assert format_published_date("2026-05-22T10:00:00Z") == "22/05/26"
 
 
+def test_format_published_date_converts_utc_to_bangkok_across_day_boundary():
+    # 18:30 UTC is 01:30 the *next* day in Bangkok (UTC+7) - must roll the date over
+    assert format_published_date("2026-05-22T18:30:00Z") == "23/05/26"
+
+
 def test_format_published_date_already_date_only():
     assert format_published_date("2026-05-22") == "2026-05-22"
 
 
 def test_format_published_date_empty():
     assert format_published_date("") == ""
+
+
+# ---- swap_dates_if_needed ----
+
+def test_swap_dates_if_needed_already_ascending_no_swap():
+    assert swap_dates_if_needed("05/08/26", "10/08/26") == ("05/08/26", "10/08/26", False)
+
+
+def test_swap_dates_if_needed_reversed_input_gets_swapped():
+    assert swap_dates_if_needed("10/08/26", "05/08/26") == ("05/08/26", "10/08/26", True)
+
+
+def test_swap_dates_if_needed_month_boundary_not_misordered():
+    # The bug this guards against: lexicographic string comparison would
+    # think "28/07/26" > "05/08/26" (day digit '2' > '0') and wrongly swap
+    # an already-correct ascending range spanning a month boundary.
+    assert swap_dates_if_needed("28/07/26", "05/08/26") == ("28/07/26", "05/08/26", False)
+
+
+def test_swap_dates_if_needed_unparsable_returns_unchanged():
+    assert swap_dates_if_needed("not a date", "05/08/26") == ("not a date", "05/08/26", False)
 
 
 # ---- detect_content_link ----

@@ -60,11 +60,15 @@ def start_run(progress_callback, done_callback, progress_percent_callback=None, 
         state["last_heartbeat"] = datetime.now().isoformat()
         progress_callback(message)
 
+    def still_current_run():
+        return state["run_id"] == my_run_id
+
     def worker():
         try:
             result = run_fetcher(
                 progress_callback=tracked_progress_callback,
                 progress_percent_callback=progress_percent_callback,
+                should_continue=still_current_run,
             )
             if state["run_id"] == my_run_id:
                 state["results"] = result
