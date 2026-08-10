@@ -195,10 +195,63 @@ def extract_channel_id(raw_id, platform):
     return raw_id
 
 
+def detect_content_link(raw_id, platform):
+    """Detect if a Channel KOLs row's URL points at one specific video/post
+    rather than a whole channel/profile, so it can be fetched directly and
+    returned regardless of the configured date range or keywords.
+
+    Returns a dict of platform-specific identifiers needed to locate that
+    exact item, or None if this looks like a channel/profile link (or isn't
+    a URL at all).
+    """
+    raw_id = raw_id.strip()
+    if not raw_id.startswith("http"):
+        return None
+
+    platform_lower = platform.lower()
+
+    if platform_lower == "youtube":
+        match = re.search(
+            r'(?:youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/)([a-zA-Z0-9_-]{6,})',
+            raw_id
+        )
+        if match:
+            return {"video_id": match.group(1)}
+        return None
+
+    if platform_lower == "tiktok":
+        match = re.search(r'tiktok\.com/@([^\s/?&#]+)/video/(\d+)', raw_id)
+        if match:
+            return {"username": match.group(1), "video_id": match.group(2)}
+        return None
+
+    if platform_lower == "instagram":
+        match = re.search(r'instagram\.com/(?:p|reel|tv)/([^/?#]+)', raw_id)
+        if match:
+            # Instagram post/reel URLs don't embed the username, so we can't
+            # tell which profile to search without it - report but can't fetch.
+            return {"code": match.group(1), "unsupported": True}
+        return None
+
+    if platform_lower == "facebook":
+        if any(seg in raw_id for seg in ("/posts/", "/videos/", "/reel/", "/watch/")):
+            match = re.search(r'(\d{6,})', raw_id)
+            if match:
+                return {"post_id": match.group(1)}
+        return None
+
+    return None
+
+
 def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
     """Read channel list from 'Channel KOLs' tab.
     A=Channel Name, B=Social Media, C=Channel ID/@handle
     Supports both plain IDs/handles and full URLs in column C.
+    Column C also accepts a direct link to a single video/post (e.g. a
+    youtube.com/watch?v=... or tiktok.com/@user/video/... URL) instead of a
+    channel/profile - detected automatically via detect_content_link() and
+    fetched directly, bypassing the date range and keyword filters, since
+    the user asked for that exact item.
     Skips header row (first row).
     """
     range_str = f"'{channel_tab_name}'!A1:C"
@@ -240,17 +293,22 @@ def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
 
         # Extract handle/ID from URL if needed
         channel_id = extract_channel_id(channel_id_raw, platform_key)
+        content_link = detect_content_link(channel_id_raw, platform_key)
 
-        channels.append({
+        channel_entry = {
             "channel_name": channel_name.strip(),
             "platform": platform_key,
             "channel_id": channel_id.strip(),
-        })
+        }
+        if content_link:
+            channel_entry["content_link"] = content_link
+        channels.append(channel_entry)
 
     if progress_callback:
         progress_callback(f"  Read {len(channels)} channels from '{channel_tab_name}'")
         for ch in channels:
-            progress_callback(f"    {ch['channel_name']} | {ch['platform']} | {ch['channel_id']}")
+            tag = " [content link]" if ch.get("content_link") else ""
+            progress_callback(f"    {ch['channel_name']} | {ch['platform']} | {ch['channel_id']}{tag}")
 
     return channels
 
@@ -381,6 +439,142 @@ def parse_date_flexible(date_str, fallback_month=""):
 # ============================================================================
 # YOUTUBE - Fetch all videos from a channel, then filter
 # ============================================================================
+
+def _youtube_video_item_to_dict(item, channel_title, subscriber_count):
+    """Build a result dict from a single YouTube videos.list API item.
+
+    Pure formatting/classification - no date or keyword filtering here,
+    so it can be shared between the per-channel batch fetch (which filters)
+    and a direct single-video lookup (which shouldn't be filtered at all).
+    """
+    vid_id = item["id"]
+    snippet = item.get("snippet", {})
+    stats = item.get("statistics", {})
+    live_details = item.get("liveStreamingDetails", None)
+    content_details = item.get("contentDetails", {})
+    duration = content_details.get("duration", "")
+
+    if live_details:
+        content_type = "Live"
+    else:
+        dur_seconds = 0
+        dur_match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
+        if dur_match:
+            h = int(dur_match.group(1) or 0)
+            m = int(dur_match.group(2) or 0)
+            s = int(dur_match.group(3) or 0)
+            dur_seconds = h * 3600 + m * 60 + s
+        # The Data API doesn't expose an explicit "is this a Short" flag,
+        # so duration is the best available signal. YouTube Shorts can be
+        # up to 3 minutes (180s) as of the current platform rules.
+        if dur_seconds > 0 and dur_seconds <= 180:
+            content_type = "Short"
+        else:
+            content_type = "VOD"
+
+    published_at = snippet.get("publishedAt", "")
+    title = snippet.get("title", "")
+    published_date = format_published_date(published_at)
+
+    duration_formatted = format_duration(duration)
+
+    # For live streams: if duration is "Live" (P0D), calculate from actualStartTime
+    if duration_formatted == "Live" and live_details:
+        actual_start = live_details.get("actualStartTime", "")
+        actual_end = live_details.get("actualEndTime", "")
+        if actual_start and actual_end:
+            try:
+                s_dt = datetime.fromisoformat(actual_start.replace("Z", "+00:00"))
+                e_dt = datetime.fromisoformat(actual_end.replace("Z", "+00:00"))
+                delta_min = int((e_dt - s_dt).total_seconds() / 60) + 1
+                duration_formatted = str(delta_min)
+            except (ValueError, TypeError):
+                pass
+        elif actual_start:
+            try:
+                s_dt = datetime.fromisoformat(actual_start.replace("Z", "+00:00"))
+                now_dt = datetime.now(timezone.utc)
+                delta_min = int((now_dt - s_dt).total_seconds() / 60) + 1
+                duration_formatted = f"{delta_min}"
+            except (ValueError, TypeError):
+                pass
+
+    video_link = f"https://www.youtube.com/watch?v={vid_id}"
+    if content_type == "Short":
+        video_link = f"https://www.youtube.com/shorts/{vid_id}"
+
+    return {
+        "channel_name": channel_title,
+        "subscribers": subscriber_count,
+        "platform": "youtube",
+        "link": video_link,
+        "content_type": content_type,
+        "published_date": published_date,
+        "views": stats.get("viewCount", "0"),
+        "likes": stats.get("likeCount", "0"),
+        "comments": stats.get("commentCount", "0"),
+        "shares": "",
+        "saves": "",
+        "duration": duration_formatted,
+        "caption": title,
+    }
+
+
+def fetch_youtube_single_video(video_id, api_key, progress_callback=None, usage=None):
+    """Fetch a single YouTube video by ID directly - used for a Channel KOLs
+    row that points straight at one video/short instead of a whole channel.
+    Not subject to date range or keyword filtering; the user asked for this
+    exact video.
+
+    Returns (list_of_0_or_1_video_dict, channel_meta).
+    """
+    vid_url = (
+        f"https://www.googleapis.com/youtube/v3/videos"
+        f"?part=snippet,statistics,liveStreamingDetails,contentDetails"
+        f"&id={video_id}&key={api_key}"
+    )
+    req = urllib.request.Request(vid_url)
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+        if usage is not None:
+            usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to fetch video {video_id}: {e}")
+        return [], {"had_error": True}
+
+    items = data.get("items", [])
+    if not items:
+        if progress_callback:
+            progress_callback(f"    Video not found: {video_id}")
+        return [], {"had_error": True}
+
+    item = items[0]
+    channel_id = item.get("snippet", {}).get("channelId", "")
+    channel_title = item.get("snippet", {}).get("channelTitle", "")
+    subscriber_count = "0"
+
+    if channel_id:
+        ch_url = (
+            f"https://www.googleapis.com/youtube/v3/channels"
+            f"?part=statistics&id={channel_id}&key={api_key}"
+        )
+        try:
+            ch_data = json.loads(urlopen_with_retry(urllib.request.Request(ch_url), timeout=15).decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
+            ch_items = ch_data.get("items", [])
+            if ch_items:
+                subscriber_count = ch_items[0].get("statistics", {}).get("subscriberCount", "0")
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"    Failed to get subscriber count for {channel_id}: {e}")
+
+    video_dict = _youtube_video_item_to_dict(item, channel_title, subscriber_count)
+    if progress_callback:
+        progress_callback(f"    Fetched video directly: {video_dict['caption']}")
+    return [video_dict], {"channel_name": channel_title, "subscribers": subscriber_count, "had_error": False}
+
 
 def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usage=None):
     """Resolve a YouTube channel identifier to a channel ID.
@@ -569,35 +763,9 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
         batch_old_count = 0
         for item in vid_data.get("items", []):
-            vid_id = item["id"]
             snippet = item.get("snippet", {})
-            stats = item.get("statistics", {})
-            live_details = item.get("liveStreamingDetails", None)
-            content_details = item.get("contentDetails", {})
-            duration = content_details.get("duration", "")
-
-            # Determine content type
-            if live_details:
-                content_type = "Live"
-            else:
-                dur_seconds = 0
-                dur_match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
-                if dur_match:
-                    h = int(dur_match.group(1) or 0)
-                    m = int(dur_match.group(2) or 0)
-                    s = int(dur_match.group(3) or 0)
-                    dur_seconds = h * 3600 + m * 60 + s
-                # The Data API doesn't expose an explicit "is this a Short" flag,
-                # so duration is the best available signal. YouTube Shorts can be
-                # up to 3 minutes (180s) as of the current platform rules.
-                if dur_seconds > 0 and dur_seconds <= 180:
-                    content_type = "Short"
-                else:
-                    content_type = "VOD"
-
-            published_at = snippet.get("publishedAt", "")
             title = snippet.get("title", "")
-            published_date = format_published_date(published_at)
+            published_date = format_published_date(snippet.get("publishedAt", ""))
 
             # Date filter (proper datetime comparison, not string)
             published_dt = parse_ddmmyy(published_date)
@@ -613,51 +781,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if keywords and not matches_keywords(title, keywords):
                 continue
 
-            duration_formatted = format_duration(duration)
-
-            # For live streams: if duration is "Live" (P0D), calculate from actualStartTime
-            if duration_formatted == "Live" and live_details:
-                actual_start = live_details.get("actualStartTime", "")
-                actual_end = live_details.get("actualEndTime", "")
-                if actual_start and actual_end:
-                    # Stream ended but duration still P0D — calculate from times
-                    try:
-                        start_dt = datetime.fromisoformat(actual_start.replace("Z", "+00:00"))
-                        end_dt = datetime.fromisoformat(actual_end.replace("Z", "+00:00"))
-                        delta_min = int((end_dt - start_dt).total_seconds() / 60) + 1
-                        duration_formatted = str(delta_min)
-                    except (ValueError, TypeError):
-                        pass
-                elif actual_start:
-                    # Stream still live — calculate from start to now
-                    try:
-                        start_dt = datetime.fromisoformat(actual_start.replace("Z", "+00:00"))
-                        now_dt = datetime.now(timezone.utc)
-                        delta_min = int((now_dt - start_dt).total_seconds() / 60) + 1
-                        duration_formatted = f"{delta_min}"
-                    except (ValueError, TypeError):
-                        pass
-
-            video_link = f"https://www.youtube.com/watch?v={vid_id}"
-            # Override link for shorts
-            if content_type == "Short":
-                video_link = f"https://www.youtube.com/shorts/{vid_id}"
-
-            matched_videos.append({
-                "channel_name": channel_title,
-                "subscribers": subscriber_count,
-                "platform": "youtube",
-                "link": video_link,
-                "content_type": content_type,
-                "published_date": published_date,
-                "views": stats.get("viewCount", "0"),
-                "likes": stats.get("likeCount", "0"),
-                "comments": stats.get("commentCount", "0"),
-                "shares": "",
-                "saves": "",
-                "duration": duration_formatted,
-                "caption": title,
-            })
+            matched_videos.append(_youtube_video_item_to_dict(item, channel_title, subscriber_count))
 
         # If ALL videos in this batch are before start_date, stop fetching more
         if start_date and batch_old_count == len(vid_data.get("items", [])) and batch_old_count > 0:
@@ -687,7 +811,7 @@ SC_API_BASE = "https://api.scrapecreators.com"
 # TIKTOK - ScrapeCreators API
 # ============================================================================
 
-def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
+def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None, target_video_id=None):
     """Fetch videos from a TikTok user via ScrapeCreators API, filter by date and keywords.
 
     Uses ScrapeCreators API:
@@ -695,6 +819,11 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     - User Videos:  GET /v3/tiktok/profile/videos?handle=username&max_cursor=xxx
 
     API key passed via "x-api-key" header.
+
+    If target_video_id is set, this looks for that exact video within the
+    user's videos instead of filtering by date/keywords - used for a Channel
+    KOLs row that points straight at one TikTok video. Not found within the
+    pages searched means it wasn't found at all (had_error is set).
 
     Returns list of dicts with video data.
     """
@@ -734,7 +863,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     matched_videos = []
     max_cursor = ""
     page_num = 0
-    max_pages = 3  # limit pages to conserve credits
+    max_pages = 10 if target_video_id else 3  # search deeper when looking for one specific video
     had_error = False
 
     while page_num < max_pages:
@@ -770,6 +899,7 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         for video in videos:
             caption = video.get("desc", "")
             create_time = video.get("create_time", "")
+            vid_id = video.get("aweme_id", "")
 
             # Parse date (create_time is Unix timestamp)
             published_date = ""
@@ -781,24 +911,29 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
                 except (ValueError, TypeError):
                     published_date = str(create_time)
 
-            # Date filter
-            published_dt = parse_ddmmyy(published_date)
-            start_dt = parse_ddmmyy(start_date) if start_date else None
-            end_dt = parse_ddmmyy(end_date) if end_date else None
-            if start_dt and published_dt and published_dt < start_dt:
-                continue
-            if end_dt and published_dt and published_dt > end_dt:
+            if target_video_id:
+                # Looking for one exact video - skip date/keyword filtering entirely
                 all_before_start = False
-                continue
+                if vid_id != target_video_id:
+                    continue
+            else:
+                # Date filter
+                published_dt = parse_ddmmyy(published_date)
+                start_dt = parse_ddmmyy(start_date) if start_date else None
+                end_dt = parse_ddmmyy(end_date) if end_date else None
+                if start_dt and published_dt and published_dt < start_dt:
+                    continue
+                if end_dt and published_dt and published_dt > end_dt:
+                    all_before_start = False
+                    continue
 
-            all_before_start = False
+                all_before_start = False
 
-            # Keyword filter
-            if keywords and not matches_keywords(caption, keywords):
-                continue
+                # Keyword filter
+                if keywords and not matches_keywords(caption, keywords):
+                    continue
 
             stats = video.get("statistics", {})
-            vid_id = video.get("aweme_id", "")
 
             # Duration (video.duration is in milliseconds)
             video_obj = video.get("video", {})
@@ -832,6 +967,12 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
                 "caption": caption,
             })
 
+            if target_video_id:
+                break  # found it, no need to keep scanning this page or the next
+
+        if target_video_id and matched_videos:
+            break
+
         # Early termination: if ALL videos in this page are before start_date
         if start_date and all_before_start:
             if progress_callback:
@@ -847,7 +988,11 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
         page_num += 1
         time.sleep(0.5)
 
-    if progress_callback:
+    if target_video_id and not matched_videos:
+        had_error = True
+        if progress_callback:
+            progress_callback(f"    Target video {target_video_id} not found in the last {max_pages} pages for @{username}")
+    elif progress_callback:
         progress_callback(f"    Matched {len(matched_videos)} videos from @{username}")
 
     channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
@@ -858,12 +1003,16 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
 # FACEBOOK - ScrapeCreators API
 # ============================================================================
 
-def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
+def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None, target_post_id=None):
     """Fetch posts from a Facebook page via ScrapeCreators API, filter by date and keywords.
 
     Uses ScrapeCreators API:
     - Profile: GET /v1/facebook/profile?url=xxx
     - Posts:   GET /v1/facebook/profile/posts?pageId=xxx&cursor=xxx
+
+    If target_post_id is set, looks for that exact post (matched by the
+    numeric ID embedded in its URL - ScrapeCreators doesn't return a
+    separate post ID field) instead of filtering by date/keywords.
 
     Returns list of dicts with post data.
     """
@@ -905,7 +1054,7 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     matched_posts = []
     cursor = ""
     page_num = 0
-    max_pages = 10  # ~30 posts max per channel (3 posts/page × 10 pages)
+    max_pages = 20 if target_post_id else 10  # search deeper when looking for one specific post
     had_error = False
 
     while page_num < max_pages:
@@ -955,21 +1104,28 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
                 except (ValueError, TypeError):
                     published_date = str(publish_time)
 
-            # Date filter
-            published_dt = parse_ddmmyy(published_date)
-            start_dt = parse_ddmmyy(start_date) if start_date else None
-            end_dt = parse_ddmmyy(end_date) if end_date else None
-            if start_dt and published_dt and published_dt < start_dt:
-                continue
-            if end_dt and published_dt and published_dt > end_dt:
+            if target_post_id:
+                # Looking for one exact post - skip date/keyword filtering entirely
                 all_before_start = False
-                continue
+                post_id_match = re.search(r'(\d{6,})', post_url)
+                if not post_id_match or post_id_match.group(1) != target_post_id:
+                    continue
+            else:
+                # Date filter
+                published_dt = parse_ddmmyy(published_date)
+                start_dt = parse_ddmmyy(start_date) if start_date else None
+                end_dt = parse_ddmmyy(end_date) if end_date else None
+                if start_dt and published_dt and published_dt < start_dt:
+                    continue
+                if end_dt and published_dt and published_dt > end_dt:
+                    all_before_start = False
+                    continue
 
-            all_before_start = False
+                all_before_start = False
 
-            # Keyword filter
-            if keywords and not matches_keywords(message, keywords):
-                continue
+                # Keyword filter
+                if keywords and not matches_keywords(message, keywords):
+                    continue
 
             reaction_count = str(post.get("reactionCount", "0"))
             comment_count = str(post.get("commentCount", "0"))
@@ -1000,6 +1156,12 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
                 "caption": message,
             })
 
+            if target_post_id:
+                break  # found it, no need to keep scanning this page or the next
+
+        if target_post_id and matched_posts:
+            break
+
         # Early termination: if ALL posts in this page are before start_date
         if start_date and all_before_start:
             if progress_callback:
@@ -1014,7 +1176,11 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
         page_num += 1
         time.sleep(0.5)
 
-    if progress_callback:
+    if target_post_id and not matched_posts:
+        had_error = True
+        if progress_callback:
+            progress_callback(f"    Target post {target_post_id} not found in the last {max_pages} pages for {channel_name}")
+    elif progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} posts from {channel_name}")
 
     channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
@@ -1637,13 +1803,21 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         log(f"\n--- Fetching YouTube channels ({len(yt_channels)}) ---")
         for ch in yt_channels:
             try:
-                log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
-                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
-                videos, meta = fetch_youtube_channel_videos(
-                    resolved_id, yt_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log, usage=yt_usage
-                )
+                content_link = ch.get("content_link")
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (video {content_link['video_id']})")
+                    videos, meta = fetch_youtube_single_video(
+                        content_link["video_id"], yt_api_key,
+                        progress_callback=log, usage=yt_usage
+                    )
+                else:
+                    log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
+                    resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
+                    videos, meta = fetch_youtube_channel_videos(
+                        resolved_id, yt_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log, usage=yt_usage
+                    )
                 all_results.extend(videos)
                 if meta.get("had_error"):
                     failed_channels["youtube"].append(ch["channel_name"])
@@ -1663,12 +1837,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         log(f"\n--- Fetching TikTok channels ({len(tt_channels)}) ---")
         for ch in tt_channels:
             try:
-                log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
-                videos, meta = fetch_tiktok_channel_videos(
-                    ch["channel_id"], sc_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
-                )
+                content_link = ch.get("content_link")
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (@{content_link['username']}, video {content_link['video_id']})")
+                    videos, meta = fetch_tiktok_channel_videos(
+                        content_link["username"], sc_api_key,
+                        progress_callback=log, target_video_id=content_link["video_id"]
+                    )
+                else:
+                    log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
+                    videos, meta = fetch_tiktok_channel_videos(
+                        ch["channel_id"], sc_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log
+                    )
                 all_results.extend(videos)
                 if meta.get("had_error"):
                     failed_channels["tiktok"].append(ch["channel_name"])
@@ -1686,12 +1868,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         log(f"\n--- Fetching Facebook pages ({len(fb_channels)}) ---")
         for ch in fb_channels:
             try:
-                log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
-                posts, meta = fetch_facebook_channel_posts(
-                    ch["channel_id"], sc_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
-                )
+                content_link = ch.get("content_link")
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id']})")
+                    posts, meta = fetch_facebook_channel_posts(
+                        ch["channel_id"], sc_api_key,
+                        progress_callback=log, target_post_id=content_link["post_id"]
+                    )
+                else:
+                    log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
+                    posts, meta = fetch_facebook_channel_posts(
+                        ch["channel_id"], sc_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log
+                    )
                 all_results.extend(posts)
                 if meta.get("had_error"):
                     failed_channels["facebook"].append(ch["channel_name"])
@@ -1709,6 +1899,12 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None):
         log(f"\n--- Fetching Instagram accounts ({len(ig_channels)}) ---")
         for ch in ig_channels:
             try:
+                content_link = ch.get("content_link")
+                if content_link and content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - Instagram post/reel URLs don't include a "
+                        f"username, so which profile to search can't be determined. Skipping (code={content_link['code']}).")
+                    failed_channels["instagram"].append(ch["channel_name"])
+                    continue
                 log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
                 posts, meta = fetch_instagram_channel_posts(
                     ch["channel_id"], sc_api_key,

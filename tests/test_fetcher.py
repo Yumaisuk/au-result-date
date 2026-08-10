@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fetcher import (
+    detect_content_link,
     extract_channel_id,
     format_duration,
     format_published_date,
@@ -190,3 +191,44 @@ def test_format_published_date_already_date_only():
 
 def test_format_published_date_empty():
     assert format_published_date("") == ""
+
+
+# ---- detect_content_link ----
+
+def test_detect_content_link_youtube_watch_url():
+    assert detect_content_link("https://www.youtube.com/watch?v=6kQDTuK5uUo", "youtube") == {"video_id": "6kQDTuK5uUo"}
+
+
+def test_detect_content_link_youtube_shorts_url():
+    assert detect_content_link("https://www.youtube.com/shorts/6kQDTuK5uUo", "youtube") == {"video_id": "6kQDTuK5uUo"}
+
+
+def test_detect_content_link_youtube_channel_url_is_not_content():
+    assert detect_content_link("https://www.youtube.com/@BaVinciPlay", "youtube") is None
+
+
+def test_detect_content_link_tiktok_video_url():
+    result = detect_content_link("https://www.tiktok.com/@someuser/video/7123456789012345678", "tiktok")
+    assert result == {"username": "someuser", "video_id": "7123456789012345678"}
+
+
+def test_detect_content_link_tiktok_profile_url_is_not_content():
+    assert detect_content_link("https://www.tiktok.com/@someuser", "tiktok") is None
+
+
+def test_detect_content_link_facebook_post_url():
+    result = detect_content_link("https://www.facebook.com/somepage/posts/123456789012345", "facebook")
+    assert result == {"post_id": "123456789012345"}
+
+
+def test_detect_content_link_facebook_profile_url_is_not_content():
+    assert detect_content_link("https://www.facebook.com/somepage", "facebook") is None
+
+
+def test_detect_content_link_instagram_reel_url_flagged_unsupported():
+    result = detect_content_link("https://www.instagram.com/reel/ABC123/", "instagram")
+    assert result == {"code": "ABC123", "unsupported": True}
+
+
+def test_detect_content_link_plain_handle_is_not_content():
+    assert detect_content_link("UCQ_S28L6WmCl6LWnnv90C9g", "youtube") is None
