@@ -12,6 +12,15 @@ a Discord bot panel or from the web UI.
   from environment variables first; the Sheet's API tab is only used as a
   fallback and is entirely optional (safe to hide or delete it, e.g. to
   keep the keys out of a Sheet that gets shared around).
+- A row in "Channel KOLs" can also be a direct link to one specific video/
+  post (e.g. a `youtube.com/watch?v=...`, `youtube.com/shorts/...`, or
+  `tiktok.com/@user/video/...` URL) instead of a channel/profile link -
+  detected automatically from the URL shape (see `detect_content_link` in
+  `fetcher.py`), no extra column needed. That exact item is fetched and
+  included in the results regardless of the configured date range or
+  keywords. Not supported for Instagram post/reel links, since Instagram
+  doesn't expose the username in those URLs, so there's no profile to
+  search - those rows are reported as failed instead of silently skipped.
 - YouTube uses the official YouTube Data API. TikTok, Facebook, and Instagram
   use the [ScrapeCreators](https://scrapecreators.com/) API.
 - `run_manager.py` holds the shared run state used by both trigger points
