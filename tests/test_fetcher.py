@@ -249,6 +249,23 @@ def test_detect_content_link_facebook_post_url():
     assert result == {"post_id": "123456789012345"}
 
 
+def test_detect_content_link_facebook_videos_url():
+    result = detect_content_link("https://www.facebook.com/somepage/videos/987654321098765", "facebook")
+    assert result == {"post_id": "987654321098765"}
+
+
+def test_detect_content_link_facebook_reel_url_flagged_unsupported():
+    # facebook.com/reel/{id} has no page name in the path at all - unlike
+    # /PageName/posts/{id}, there's no profile to search from the URL alone
+    result = detect_content_link("https://www.facebook.com/reel/1682717543474921", "facebook")
+    assert result == {"post_id": "1682717543474921", "unsupported": True}
+
+
+def test_detect_content_link_facebook_watch_url_flagged_unsupported():
+    result = detect_content_link("https://www.facebook.com/watch/?v=1234567890123", "facebook")
+    assert result == {"post_id": "1234567890123", "unsupported": True}
+
+
 def test_detect_content_link_facebook_profile_url_is_not_content():
     assert detect_content_link("https://www.facebook.com/somepage", "facebook") is None
 

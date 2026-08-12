@@ -18,9 +18,15 @@ a Discord bot panel or from the web UI.
   detected automatically from the URL shape (see `detect_content_link` in
   `fetcher.py`), no extra column needed. That exact item is fetched and
   included in the results regardless of the configured date range or
-  keywords. Not supported for Instagram post/reel links, since Instagram
-  doesn't expose the username in those URLs, so there's no profile to
-  search - those rows are reported as failed instead of silently skipped.
+  keywords. `facebook.com/PageName/posts/...` and `.../videos/...` URLs
+  work the same way (the page name is right there in the path). Not
+  supported for Instagram post/reel links or Facebook's page-less
+  `facebook.com/reel/...` and `facebook.com/watch/?v=...` URLs, since none
+  of those expose the owning page/profile name in the URL at all - there's
+  no way to know which profile to search, and Facebook's public oEmbed
+  endpoint that used to resolve this is deprecated. Those rows are
+  reported as failed instead of silently skipped or searching the wrong
+  profile.
 - TikTok share short-links (`vt.tiktok.com/...`, `vm.tiktok.com/...` - what
   you get from the app's "Share" button) are automatically resolved to
   their canonical `tiktok.com/@user/video/...` URL first (see
