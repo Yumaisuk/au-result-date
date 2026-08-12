@@ -262,7 +262,18 @@ def detect_content_link(raw_id, platform):
         return None
 
     if platform_lower == "facebook":
-        if any(seg in raw_id for seg in ("/posts/", "/videos/", "/reel/", "/watch/")):
+        # facebook.com/reel/{id} and facebook.com/watch/?v={id} are "global
+        # feed" URLs with no page name in the path at all - unlike
+        # facebook.com/PageName/posts/{id}, there's nothing here to tell us
+        # which page to search (same fundamental issue as Instagram above,
+        # and unlike TikTok's short-links, there's no unauthenticated way to
+        # resolve it either - Facebook's public oEmbed endpoint is dead).
+        if re.search(r'facebook\.com/reel/(\d+)', raw_id) or re.search(r'facebook\.com/watch/?\?v=(\d+)', raw_id):
+            match = re.search(r'(\d{6,})', raw_id)
+            if match:
+                return {"post_id": match.group(1), "unsupported": True}
+            return None
+        if any(seg in raw_id for seg in ("/posts/", "/videos/")):
             match = re.search(r'(\d{6,})', raw_id)
             if match:
                 return {"post_id": match.group(1)}
@@ -1935,6 +1946,11 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
         for ch in fb_channels:
             try:
                 content_link = ch.get("content_link")
+                if content_link and content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - facebook.com/reel/ and /watch/ URLs don't "
+                        f"include a page name, so which page to search can't be determined. Skipping (post_id={content_link['post_id']}).")
+                    failed_channels["facebook"].append(ch["channel_name"])
+                    continue
                 if content_link:
                     log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id']})")
                     posts, meta = fetch_facebook_channel_posts(
