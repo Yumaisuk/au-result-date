@@ -12,6 +12,7 @@ from fetcher import (
     matches_keywords,
     parse_ddmmyy,
     parse_date_flexible,
+    resolve_tiktok_short_url,
     swap_dates_if_needed,
 )
 
@@ -259,3 +260,16 @@ def test_detect_content_link_instagram_reel_url_flagged_unsupported():
 
 def test_detect_content_link_plain_handle_is_not_content():
     assert detect_content_link("UCQ_S28L6WmCl6LWnnv90C9g", "youtube") is None
+
+
+# ---- resolve_tiktok_short_url ----
+
+def test_resolve_tiktok_short_url_passthrough_for_normal_url():
+    # Not a vt./vm.tiktok.com short-link - must return unchanged, no network call
+    url = "https://www.tiktok.com/@someuser/video/1234567890"
+    assert resolve_tiktok_short_url(url) == url
+
+
+def test_resolve_tiktok_short_url_passthrough_for_non_tiktok_url():
+    url = "https://www.youtube.com/watch?v=abc123"
+    assert resolve_tiktok_short_url(url) == url

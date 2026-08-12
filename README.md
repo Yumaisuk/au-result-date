@@ -21,6 +21,11 @@ a Discord bot panel or from the web UI.
   keywords. Not supported for Instagram post/reel links, since Instagram
   doesn't expose the username in those URLs, so there's no profile to
   search - those rows are reported as failed instead of silently skipped.
+- TikTok share short-links (`vt.tiktok.com/...`, `vm.tiktok.com/...` - what
+  you get from the app's "Share" button) are automatically resolved to
+  their canonical `tiktok.com/@user/video/...` URL first (see
+  `resolve_tiktok_short_url`), since the short-link itself doesn't contain
+  a username or video ID for the parsing above to work with.
 - YouTube uses the official YouTube Data API. TikTok, Facebook, and Instagram
   use the [ScrapeCreators](https://scrapecreators.com/) API.
 - `run_manager.py` holds the shared run state used by both trigger points

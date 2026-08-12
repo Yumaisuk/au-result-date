@@ -126,6 +126,34 @@ def read_api_keys(sheets_service, api_tab_name, progress_callback=None):
     return yt_key, sc_key
 
 
+_TIKTOK_SHORT_LINK_DOMAINS = ("vt.tiktok.com", "vm.tiktok.com")
+
+
+def resolve_tiktok_short_url(url, timeout=10, progress_callback=None):
+    """Resolve a TikTok share short-link (vt.tiktok.com / vm.tiktok.com,
+    e.g. from the app's "Share" button) to its canonical
+    https://www.tiktok.com/@user/video/... URL by following the redirect.
+
+    Neither extract_channel_id() nor detect_content_link() can make sense
+    of a short-link - there's no @username or video ID visible in it at
+    all - so without this, a pasted short-link silently gets sent to the
+    ScrapeCreators API as a bogus "handle" and fails outright.
+
+    Returns the original url unchanged if it's not a recognized short-link
+    domain, or if resolution fails for any reason.
+    """
+    if not any(domain in url for domain in _TIKTOK_SHORT_LINK_DOMAINS):
+        return url
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.geturl()
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to resolve TikTok short-link {url}: {e}")
+        return url
+
+
 def extract_channel_id(raw_id, platform):
     """Extract channel ID/handle from a URL or raw value.
 
@@ -290,6 +318,12 @@ def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
             platform_key = "instagram"
         else:
             platform_key = platform_lower
+
+        # TikTok share short-links (vt.tiktok.com/vm.tiktok.com) don't
+        # contain a @username or video ID at all - resolve to the
+        # canonical URL first so the parsing below can actually work.
+        if platform_key == "tiktok":
+            channel_id_raw = resolve_tiktok_short_url(channel_id_raw, progress_callback=progress_callback)
 
         # Extract handle/ID from URL if needed
         channel_id = extract_channel_id(channel_id_raw, platform_key)
