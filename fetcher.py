@@ -289,8 +289,15 @@ def detect_content_link(raw_id, platform):
         # ScrapeCreators only has a single-clip lookup for Kick (no
         # channel-wide clip listing endpoint exists yet), so every Kick row
         # must be a clip link - a bare channel URL has nothing to fetch.
-        match = re.search(r'kick\.com/[^/]+/clips/(clip_[a-zA-Z0-9]+)', raw_id)
-        if match:
+        # kick.com/channel/videos/{uuid} is a full VOD/stream replay, a
+        # different content type from a "clip" - ScrapeCreators' endpoint is
+        # documented specifically for clip URLs and it's unclear whether it
+        # also accepts VOD URLs, so this is passed through and attempted
+        # rather than assumed to fail; fetch_kick_clip() reports a clear
+        # had_error if the API rejects it.
+        if re.search(r'kick\.com/[^/]+/clips/(clip_[a-zA-Z0-9]+)', raw_id):
+            return {"clip_url": raw_id}
+        if re.search(r'kick\.com/[^/]+/videos/([a-zA-Z0-9-]+)', raw_id):
             return {"clip_url": raw_id}
         return None
 
