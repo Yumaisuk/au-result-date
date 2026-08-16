@@ -112,6 +112,14 @@ def test_extract_channel_id_instagram_url():
     assert extract_channel_id("https://www.instagram.com/someuser", "instagram") == "someuser"
 
 
+def test_extract_channel_id_kick_channel_url():
+    assert extract_channel_id("https://kick.com/xqc", "kick") == "xqc"
+
+
+def test_extract_channel_id_kick_clip_url():
+    assert extract_channel_id("https://kick.com/xqc/clips/clip_01JGJHB6CEVFCQRYTVPM8DW892", "kick") == "xqc"
+
+
 def test_extract_channel_id_empty_returns_empty():
     assert extract_channel_id("", "youtube") == ""
 
@@ -273,6 +281,16 @@ def test_detect_content_link_facebook_profile_url_is_not_content():
 def test_detect_content_link_instagram_reel_url_flagged_unsupported():
     result = detect_content_link("https://www.instagram.com/reel/ABC123/", "instagram")
     assert result == {"code": "ABC123", "unsupported": True}
+
+
+def test_detect_content_link_kick_clip_url():
+    url = "https://kick.com/xqc/clips/clip_01JGJHB6CEVFCQRYTVPM8DW892"
+    assert detect_content_link(url, "kick") == {"clip_url": url}
+
+
+def test_detect_content_link_kick_channel_url_is_not_content():
+    # No channel-listing endpoint exists for Kick - a bare channel URL has nothing to fetch
+    assert detect_content_link("https://kick.com/xqc", "kick") is None
 
 
 def test_detect_content_link_plain_handle_is_not_content():
