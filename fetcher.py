@@ -641,7 +641,7 @@ def fetch_youtube_single_video(video_id, api_key, progress_callback=None, usage=
 
 def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usage=None):
     """Resolve a YouTube channel identifier to a channel ID.
-    Handles: @handle, UC... channel ID, full URL
+    Handles: @handle, UC... channel ID, full URL, custom name/slug.
     """
     channel_id = channel_id.strip()
 
@@ -649,7 +649,9 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usag
     if channel_id.startswith("UC") and len(channel_id) == 24:
         return channel_id
 
-    # Full URL
+    # Full URL (defensive - by the time run_fetcher calls this, the value
+    # has normally already been through extract_channel_id(), which strips
+    # the URL down to a bare handle/slug/ID)
     if "youtube.com" in channel_id:
         # Extract @handle from URL
         handle_match = re.search(r'youtube\.com/@([a-zA-Z0-9_.-]+)', channel_id)
@@ -661,30 +663,35 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usag
             if ch_match:
                 return ch_match.group(1)
 
-    # @handle -> resolve via API
-    if channel_id.startswith("@"):
-        url = (
-            f"https://www.googleapis.com/youtube/v3/search"
-            f"?part=snippet&type=channel&q={urllib.parse.quote(channel_id, safe='')}"
-            f"&maxResults=1&key={api_key}"
-        )
-        req = urllib.request.Request(url)
-        try:
-            data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
-            if usage is not None:
-                usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
-            items = data.get("items", [])
-            if items:
-                ch_id = items[0].get("snippet", {}).get("channelId", "")
-                if ch_id:
-                    if progress_callback:
-                        progress_callback(f"    Resolved {channel_id} -> {ch_id}")
-                    return ch_id
-        except Exception as e:
-            if progress_callback:
-                progress_callback(f"    Failed to resolve {channel_id}: {e}")
+    # Anything that isn't a UC... ID at this point needs resolving via the
+    # search API - this includes @handles, but also custom names/slugs from
+    # youtube.com/c/... and legacy youtube.com/CustomName URLs, both of
+    # which extract_channel_id() returns *without* a leading "@" (unlike a
+    # handle). Gating this on a leading "@" (as before) silently skipped
+    # resolution for a URL-derived handle/slug and sent the raw text straight
+    # to channels.list as if it were already a real ID - which always 404s.
+    url = (
+        f"https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&type=channel&q={urllib.parse.quote(channel_id, safe='')}"
+        f"&maxResults=1&key={api_key}"
+    )
+    req = urllib.request.Request(url)
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+        if usage is not None:
+            usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
+        items = data.get("items", [])
+        if items:
+            ch_id = items[0].get("snippet", {}).get("channelId", "")
+            if ch_id:
+                if progress_callback:
+                    progress_callback(f"    Resolved {channel_id} -> {ch_id}")
+                return ch_id
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to resolve {channel_id}: {e}")
 
-    # Fallback: treat as channel ID directly
+    # Fallback: treat as channel ID directly (last resort, will likely 404)
     return channel_id
 
 
