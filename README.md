@@ -1,9 +1,9 @@
 # Au Result Date
 
-A Flask web app that fetches YouTube, TikTok, Facebook, and Instagram videos/posts
-for a list of channels defined in a Google Sheet, filters them by date range and
-keywords, and writes the results back out as a CSV. Runs can be triggered from
-a Discord bot panel or from the web UI.
+A Flask web app that fetches YouTube, TikTok, Facebook, Instagram, and Kick
+videos/posts/clips for a list of channels defined in a Google Sheet, filters
+them by date range and keywords, and writes the results back out as a CSV.
+Runs can be triggered from a Discord bot panel or from the web UI.
 
 ## How it works
 
@@ -32,8 +32,14 @@ a Discord bot panel or from the web UI.
   their canonical `tiktok.com/@user/video/...` URL first (see
   `resolve_tiktok_short_url`), since the short-link itself doesn't contain
   a username or video ID for the parsing above to work with.
-- YouTube uses the official YouTube Data API. TikTok, Facebook, and Instagram
-  use the [ScrapeCreators](https://scrapecreators.com/) API.
+- **Kick only supports content links** (`kick.com/channel/clips/clip_xxx`)
+  - ScrapeCreators currently offers a single-clip lookup for Kick and
+  nothing else, no channel-wide clip listing endpoint exists yet, so
+  there's no whole-channel/date-range fetch mode for Kick the way there is
+  for the other platforms. A bare `kick.com/channel` row has nothing to
+  fetch and is reported as failed.
+- YouTube uses the official YouTube Data API. TikTok, Facebook, Instagram,
+  and Kick use the [ScrapeCreators](https://scrapecreators.com/) API.
 - `run_manager.py` holds the shared run state used by both trigger points
   below, so only one fetch can run at a time. A run is only reclaimed as
   "stuck" after it stops reporting progress for 2 minutes (not just because

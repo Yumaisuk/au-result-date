@@ -246,7 +246,7 @@
                 totalViews += v;
             });
 
-            const icons = {youtube: '🎥', tiktok: '🎵', facebook: '📘', instagram: '📸'};
+            const icons = {youtube: '🎥', tiktok: '🎵', facebook: '📘', instagram: '📸', kick: '🟢'};
             let summaryHtml = `<strong>${rows.length}</strong> รายการ | `;
             Object.entries(platformCounts).forEach(([p, c]) => {
                 summaryHtml += `${icons[p] || '❓'} ${p}: <strong>${c}</strong> | `;

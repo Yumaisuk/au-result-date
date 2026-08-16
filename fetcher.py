@@ -219,6 +219,12 @@ def extract_channel_id(raw_id, platform):
         if match:
             return match.group(1)
 
+    elif platform_lower == "kick":
+        # https://kick.com/channel-slug or https://kick.com/channel-slug/clips/clip_xxx
+        match = re.search(r'kick\.com/([a-zA-Z0-9_-]+)', raw_id)
+        if match:
+            return match.group(1)
+
     # If URL but can't parse, return the raw value and let caller handle it
     return raw_id
 
@@ -279,6 +285,15 @@ def detect_content_link(raw_id, platform):
                 return {"post_id": match.group(1)}
         return None
 
+    if platform_lower == "kick":
+        # ScrapeCreators only has a single-clip lookup for Kick (no
+        # channel-wide clip listing endpoint exists yet), so every Kick row
+        # must be a clip link - a bare channel URL has nothing to fetch.
+        match = re.search(r'kick\.com/[^/]+/clips/(clip_[a-zA-Z0-9]+)', raw_id)
+        if match:
+            return {"clip_url": raw_id}
+        return None
+
     return None
 
 
@@ -327,6 +342,8 @@ def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
             platform_key = "facebook"
         elif platform_lower in ("instagram", "ig"):
             platform_key = "instagram"
+        elif platform_lower in ("kick",):
+            platform_key = "kick"
         else:
             platform_key = platform_lower
 
@@ -1546,6 +1563,72 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
 
 # ============================================================================
+# KICK - ScrapeCreators API
+# ============================================================================
+
+def fetch_kick_clip(clip_url, api_key, progress_callback=None):
+    """Fetch a single Kick clip by its URL via ScrapeCreators.
+
+    Uses ScrapeCreators API: GET /v1/kick/clip?url=...
+
+    This is currently the *only* Kick endpoint ScrapeCreators offers - there
+    is no channel-wide clip-listing endpoint, so unlike the other platforms
+    there is no whole-channel fetch mode for Kick, only this direct
+    single-clip lookup (always used via a Channel KOLs content link).
+
+    Returns (list_of_0_or_1_clip_dict, channel_meta).
+    """
+    sc_headers = {"x-api-key": api_key}
+    url = f"{SC_API_BASE}/v1/kick/clip?url={urllib.parse.quote(clip_url, safe='')}"
+    req = urllib.request.Request(url, headers=sc_headers, method="GET")
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to fetch Kick clip: {e}")
+        return [], {"had_error": True}
+
+    clip = data.get("clip", {})
+    if not clip:
+        if progress_callback:
+            progress_callback(f"    Kick clip not found: {clip_url}")
+        return [], {"had_error": True}
+
+    channel = clip.get("channel", {})
+    channel_name = channel.get("username") or channel.get("slug", "")
+
+    # Duration is in seconds (unlike TikTok's milliseconds)
+    duration_seconds = clip.get("duration", 0)
+    duration_formatted = ""
+    if isinstance(duration_seconds, (int, float)) and duration_seconds:
+        total_minutes = int(duration_seconds) // 60
+        if int(duration_seconds) % 60 > 0:
+            total_minutes += 1
+        duration_formatted = str(total_minutes)
+
+    clip_dict = {
+        "channel_name": channel_name,
+        "subscribers": "0",  # not exposed by this endpoint
+        "platform": "kick",
+        "link": clip_url,
+        "content_type": "Short",
+        "published_date": format_published_date(clip.get("created_at", "")),
+        "views": str(clip.get("views", "0")),
+        "likes": str(clip.get("likes", "0")),
+        "comments": "",  # not available from ScrapeCreators
+        "shares": "",    # not available from ScrapeCreators
+        "saves": "",     # not available from ScrapeCreators
+        "duration": duration_formatted,
+        "caption": clip.get("title", ""),
+    }
+    if progress_callback:
+        progress_callback(f"    Fetched Kick clip directly: {clip_dict['caption']}")
+
+    channel_meta = {"channel_name": channel_name, "subscribers": "0", "had_error": False}
+    return [clip_dict], channel_meta
+
+
+# ============================================================================
 # ACCOUNT STATUS
 # ============================================================================
 
@@ -1872,15 +1955,17 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
     tt_channels = [ch for ch in channels if ch["platform"] == "tiktok"]
     fb_channels = [ch for ch in channels if ch["platform"] == "facebook"]
     ig_channels = [ch for ch in channels if ch["platform"] == "instagram"]
+    kick_channels = [ch for ch in channels if ch["platform"] == "kick"]
 
     log(f"\n  Total channels: {len(channels)}")
     log(f"    YouTube: {len(yt_channels)}")
     log(f"    TikTok: {len(tt_channels)}")
     log(f"    Facebook: {len(fb_channels)}")
     log(f"    Instagram: {len(ig_channels)}")
+    log(f"    Kick: {len(kick_channels)}")
 
     all_results = []
-    failed_channels = {"youtube": [], "tiktok": [], "facebook": [], "instagram": []}
+    failed_channels = {"youtube": [], "tiktok": [], "facebook": [], "instagram": [], "kick": []}
 
     # ---- Fetch YouTube channels ----
     if yt_channels and yt_api_key:
@@ -2012,6 +2097,31 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
     elif ig_channels and not sc_api_key:
         log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
 
+    # ---- Fetch Kick clips ----
+    if kick_channels and sc_api_key:
+        log(f"\n--- Fetching Kick clips ({len(kick_channels)}) ---")
+        for ch in kick_channels:
+            try:
+                content_link = ch.get("content_link")
+                if not content_link:
+                    log(f"\n  {ch['channel_name']} - Kick only supports single-clip links "
+                        f"(kick.com/channel/clips/clip_xxx) for now, not whole-channel fetching. Skipping.")
+                    failed_channels["kick"].append(ch["channel_name"])
+                    continue
+                log(f"\n  Content link: {ch['channel_name']} (kick clip)")
+                clips, meta = fetch_kick_clip(content_link["clip_url"], sc_api_key, progress_callback=log)
+                all_results.extend(clips)
+                if meta.get("had_error"):
+                    failed_channels["kick"].append(ch["channel_name"])
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
+                failed_channels["kick"].append(ch["channel_name"])
+            finally:
+                channel_done()
+    elif kick_channels and not sc_api_key:
+        log("\n  Kick channels found but no ScrapeCreators API key. Skipping.")
+
     if should_continue is not None and not should_continue():
         log("\n  Aborting: this run was superseded (reclaimed as stale, or reset) - not writing to the Sheet.")
         return {"success": False, "total_rows": len(all_results), "results": all_results, "error": "Superseded by a newer run"}
@@ -2057,7 +2167,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
         p = r["platform"]
         platform_counts[p] = platform_counts.get(p, 0) + 1
     for p, c in platform_counts.items():
-        icon = {"youtube": "YT", "tiktok": "TT", "facebook": "FB", "instagram": "IG"}.get(p, "??")
+        icon = {"youtube": "YT", "tiktok": "TT", "facebook": "FB", "instagram": "IG", "kick": "KI"}.get(p, "??")
         log(f"    {icon} {p}: {c}")
 
     if yt_usage["yt_units"]:

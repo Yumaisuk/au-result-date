@@ -99,7 +99,7 @@ class ControlPanelView(discord.ui.View):
                 failed_channels = result.get("failed_channels") or {}
                 failed_names = [name for names in failed_channels.values() for name in names]
                 if failed_names:
-                    platform_labels = {"youtube": "YouTube", "tiktok": "TikTok", "facebook": "Facebook", "instagram": "Instagram"}
+                    platform_labels = {"youtube": "YouTube", "tiktok": "TikTok", "facebook": "Facebook", "instagram": "Instagram", "kick": "Kick"}
                     parts = [f"{platform_labels.get(p, p)} ({len(names)}): {', '.join(names)}"
                               for p, names in failed_channels.items() if names]
                     lines.append(f"⚠️ ดึงข้อมูลไม่สำเร็จ {len(failed_names)} ช่อง — " + " | ".join(parts))
