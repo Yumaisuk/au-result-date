@@ -288,6 +288,12 @@ def test_detect_content_link_kick_clip_url():
     assert detect_content_link(url, "kick") == {"clip_url": url}
 
 
+def test_detect_content_link_kick_video_url():
+    # kick.com/channel/videos/{uuid} is a VOD, not a "clip" - attempted anyway
+    url = "https://kick.com/huahed/videos/01a00053-e020-72db-96dc-a1eb847a98fa"
+    assert detect_content_link(url, "kick") == {"clip_url": url}
+
+
 def test_detect_content_link_kick_channel_url_is_not_content():
     # No channel-listing endpoint exists for Kick - a bare channel URL has nothing to fetch
     assert detect_content_link("https://kick.com/xqc", "kick") is None
