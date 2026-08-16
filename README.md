@@ -32,15 +32,16 @@ Runs can be triggered from a Discord bot panel or from the web UI.
   their canonical `tiktok.com/@user/video/...` URL first (see
   `resolve_tiktok_short_url`), since the short-link itself doesn't contain
   a username or video ID for the parsing above to work with.
-- **Kick only supports content links** (`kick.com/channel/clips/clip_xxx` or
-  `kick.com/channel/videos/{uuid}` for a full VOD) - ScrapeCreators
-  currently offers a single-clip lookup for Kick and nothing else, no
-  channel-wide clip listing endpoint exists yet, so there's no
-  whole-channel/date-range fetch mode for Kick the way there is for the
-  other platforms. A bare `kick.com/channel` row has nothing to fetch and
-  is reported as failed. VOD URLs are attempted the same as clip URLs even
-  though ScrapeCreators only documents clip support - if the API rejects
-  them, that row reports as failed rather than silently skipped.
+- **Kick only supports content links to clips** (`kick.com/channel/clips/clip_xxx`)
+  - ScrapeCreators currently offers a single-clip lookup for Kick and
+  nothing else, no channel-wide clip listing endpoint exists yet, so
+  there's no whole-channel/date-range fetch mode for Kick the way there is
+  for the other platforms. A bare `kick.com/channel` row has nothing to
+  fetch and is reported as failed. `kick.com/channel/videos/{uuid}` links
+  (full VODs, a different content type from a "clip") are also not
+  supported - confirmed by testing against the real API, which returns an
+  HTTP 500 for every VOD URL - so these are flagged and reported as failed
+  up front rather than wasting an API call on a guaranteed error.
 - YouTube uses the official YouTube Data API. TikTok, Facebook, Instagram,
   and Kick use the [ScrapeCreators](https://scrapecreators.com/) API.
 - `run_manager.py` holds the shared run state used by both trigger points
