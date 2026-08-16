@@ -288,10 +288,11 @@ def test_detect_content_link_kick_clip_url():
     assert detect_content_link(url, "kick") == {"clip_url": url}
 
 
-def test_detect_content_link_kick_video_url():
-    # kick.com/channel/videos/{uuid} is a VOD, not a "clip" - attempted anyway
+def test_detect_content_link_kick_video_url_flagged_unsupported():
+    # kick.com/channel/videos/{uuid} is a VOD, not a "clip" - confirmed via
+    # a live API test that ScrapeCreators 500s on these every time
     url = "https://kick.com/huahed/videos/01a00053-e020-72db-96dc-a1eb847a98fa"
-    assert detect_content_link(url, "kick") == {"clip_url": url}
+    assert detect_content_link(url, "kick") == {"clip_url": url, "unsupported": True}
 
 
 def test_detect_content_link_kick_channel_url_is_not_content():

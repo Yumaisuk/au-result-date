@@ -290,15 +290,16 @@ def detect_content_link(raw_id, platform):
         # channel-wide clip listing endpoint exists yet), so every Kick row
         # must be a clip link - a bare channel URL has nothing to fetch.
         # kick.com/channel/videos/{uuid} is a full VOD/stream replay, a
-        # different content type from a "clip" - ScrapeCreators' endpoint is
-        # documented specifically for clip URLs and it's unclear whether it
-        # also accepts VOD URLs, so this is passed through and attempted
-        # rather than assumed to fail; fetch_kick_clip() reports a clear
-        # had_error if the API rejects it.
+        # different content type from a "clip". Confirmed by testing against
+        # the real API: ScrapeCreators returns "HTTP Error 500: Internal
+        # Server Error" for every VOD URL tried, so this is now flagged as
+        # unsupported up front instead of wasting an API call on a
+        # guaranteed failure.
         if re.search(r'kick\.com/[^/]+/clips/(clip_[a-zA-Z0-9]+)', raw_id):
             return {"clip_url": raw_id}
-        if re.search(r'kick\.com/[^/]+/videos/([a-zA-Z0-9-]+)', raw_id):
-            return {"clip_url": raw_id}
+        match = re.search(r'kick\.com/[^/]+/videos/([a-zA-Z0-9-]+)', raw_id)
+        if match:
+            return {"clip_url": raw_id, "unsupported": True}
         return None
 
     return None
@@ -2113,6 +2114,13 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                 if not content_link:
                     log(f"\n  {ch['channel_name']} - Kick only supports single-clip links "
                         f"(kick.com/channel/clips/clip_xxx) for now, not whole-channel fetching. Skipping.")
+                    failed_channels["kick"].append(ch["channel_name"])
+                    continue
+                if content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - this is a Kick VOD URL "
+                        f"(kick.com/channel/videos/...), not a clip URL. ScrapeCreators' Kick API only "
+                        f"supports clip URLs (kick.com/channel/clips/clip_xxx) - VOD links return a server "
+                        f"error every time. Skipping.")
                     failed_channels["kick"].append(ch["channel_name"])
                     continue
                 log(f"\n  Content link: {ch['channel_name']} (kick clip)")
