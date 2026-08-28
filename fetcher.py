@@ -860,6 +860,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         for item in vid_data.get("items", []):
             snippet = item.get("snippet", {})
             title = snippet.get("title", "")
+            description = snippet.get("description", "")
             published_date = format_published_date(snippet.get("publishedAt", ""))
 
             # Date filter (proper datetime comparison, not string)
@@ -872,8 +873,10 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if end_dt and published_dt and published_dt > end_dt:
                 continue
 
-            # Keyword filter (case-insensitive, match any keyword in title only)
-            if keywords and not matches_keywords(title, keywords):
+            # Keyword filter (case-insensitive, match title OR description -
+            # a campaign keyword often only appears in the description, e.g.
+            # a pinned hashtag/link, not the title itself)
+            if keywords and not matches_keywords(f"{title}\n{description}", keywords):
                 continue
 
             matched_videos.append(_youtube_video_item_to_dict(item, channel_title, subscriber_count))
@@ -958,7 +961,11 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
     matched_videos = []
     max_cursor = ""
     page_num = 0
-    max_pages = 10 if target_video_id else 3  # search deeper when looking for one specific video
+    # The date-range early-exit below (all_before_start) is the real stop
+    # condition once we pass start_date - these are just a safety cap
+    # against runaway pagination, kept high so an active account's full
+    # date range doesn't get cut off before that early-exit ever fires.
+    max_pages = 30 if target_video_id else 20
     had_error = False
 
     while page_num < max_pages:
@@ -1149,7 +1156,9 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
     matched_posts = []
     cursor = ""
     page_num = 0
-    max_pages = 20 if target_post_id else 10  # search deeper when looking for one specific post
+    # Same reasoning as the TikTok fetcher above: all_before_start is the
+    # real stop condition, this is just a generous safety cap.
+    max_pages = 40 if target_post_id else 25
     had_error = False
 
     while page_num < max_pages:
@@ -1328,7 +1337,9 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     # ---- Fetch Posts ----
     next_max_id = ""
     page_num = 0
-    max_pages = 3
+    # Same reasoning as TikTok/Facebook: the date filter below is the real
+    # stop condition, this is just a generous safety cap.
+    max_pages = 10
 
     while page_num < max_pages:
         params = f"handle={urllib.parse.quote(username, safe='')}"
@@ -1453,7 +1464,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     # ---- Fetch Reels (separate tab) ----
     reels_max_id = ""
     page_num = 0
-    max_reel_pages = 3
+    max_reel_pages = 10
 
     while page_num < max_reel_pages:
         params = f"handle={urllib.parse.quote(username, safe='')}"
@@ -1484,7 +1495,12 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 continue
             seen_codes.add(code)
 
-            # Caption is often null on reels endpoint
+            # ScrapeCreators' own docs note this endpoint doesn't return the
+            # reel's description via `caption` (usually null here) -
+            # clips_metadata.reusable_text_attribute_string carries the same
+            # caption text as a fallback when present. Without this, a reel
+            # that should match a keyword filter would be wrongly excluded
+            # just because this endpoint left caption empty.
             caption_obj = media.get("caption")
             if isinstance(caption_obj, dict):
                 caption = caption_obj.get("text", "")
@@ -1492,6 +1508,8 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
                 caption = caption_obj
             else:
                 caption = ""
+            if not caption:
+                caption = (media.get("clips_metadata") or {}).get("reusable_text_attribute_string") or ""
 
             taken_at = media.get("taken_at", "")
             published_date = ""
