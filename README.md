@@ -12,6 +12,13 @@ Runs can be triggered from a Discord bot panel or from the web UI.
   from environment variables first; the Sheet's API tab is only used as a
   fallback and is entirely optional (safe to hide or delete it, e.g. to
   keep the keys out of a Sheet that gets shared around).
+- Rows written to the Result tab are always reordered to match the row
+  order of the "Channel KOLs" tab (not grouped by platform), so the output
+  lines up 1:1 with the input list for easy copy/paste. A channel that
+  can't be fetched at all - an unsupported/broken link, a missing API key,
+  a repeated API failure - still gets a row at its original position, with
+  the exact link/handle that was pasted and `Error` in the Content Type
+  column, instead of silently disappearing from the results.
 - A row in "Channel KOLs" can also be a direct link to one specific video/
   post (e.g. a `youtube.com/watch?v=...`, `youtube.com/shorts/...`, or
   `tiktok.com/@user/video/...` URL) instead of a channel/profile link -

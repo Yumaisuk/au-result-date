@@ -9,6 +9,7 @@ from fetcher import (
     extract_channel_id,
     format_duration,
     format_published_date,
+    make_error_row,
     matches_keywords,
     parse_ddmmyy,
     parse_date_flexible,
@@ -302,6 +303,27 @@ def test_detect_content_link_kick_channel_url_is_not_content():
 
 def test_detect_content_link_plain_handle_is_not_content():
     assert detect_content_link("UCQ_S28L6WmCl6LWnnv90C9g", "youtube") is None
+
+
+# ---- make_error_row ----
+
+def test_make_error_row_uses_raw_link_and_marks_error():
+    ch = {"channel_name": "SomeKOL", "platform": "instagram", "channel_id": "someuser",
+          "raw_link": "https://www.instagram.com/reel/ABC123/", "order": 4}
+    row = make_error_row(ch, "ลิงก์นี้ไม่รองรับ")
+    assert row["channel_name"] == "SomeKOL"
+    assert row["platform"] == "instagram"
+    assert row["link"] == "https://www.instagram.com/reel/ABC123/"
+    assert row["content_type"] == "Error"
+    assert row["caption"] == "ลิงก์นี้ไม่รองรับ"
+    assert row["order"] == 4
+
+
+def test_make_error_row_falls_back_to_channel_id_when_no_raw_link():
+    ch = {"channel_name": "SomeKOL", "platform": "youtube", "channel_id": "someuser"}
+    row = make_error_row(ch)
+    assert row["link"] == "someuser"
+    assert row["order"] == 0
 
 
 # ---- resolve_tiktok_short_url ----
