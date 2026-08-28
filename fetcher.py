@@ -2,35 +2,17 @@ import csv
 import re
 import os
 import json
-import threading
 import time
 import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # Bangkok timezone
 BANGKOK_TZ = timezone(timedelta(hours=7))
-
-# How many channels to fetch concurrently in run_fetcher(). The work here is
-# almost entirely waiting on network I/O and deliberate rate-limit sleeps
-# (not CPU), so threads - not processes - are the right tool, and the GIL
-# isn't a bottleneck. Kept modest to avoid bursting past whatever concurrent
-# request limits ScrapeCreators/YouTube enforce per API key.
-FETCH_CONCURRENCY = 5
-
-_usage_lock = threading.Lock()
-
-
-def bump_usage(usage, key, amount):
-    """Thread-safe increment for a usage-tracking dict shared across
-    concurrently-fetched YouTube channels (see FETCH_CONCURRENCY)."""
-    with _usage_lock:
-        usage[key] = usage.get(key, 0) + amount
 
 # --- Config (from environment variables) ---
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1_lHNg3BbGKdyN4SfHhymjsAHNZ2BW8e36zVw1U0e3SM")
@@ -643,7 +625,7 @@ def fetch_youtube_single_video(video_id, api_key, progress_callback=None, usage=
     try:
         data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         if usage is not None:
-            bump_usage(usage, "yt_units", 1)  # videos.list costs 1 unit
+            usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to fetch video {video_id}: {e}")
@@ -668,7 +650,7 @@ def fetch_youtube_single_video(video_id, api_key, progress_callback=None, usage=
         try:
             ch_data = json.loads(urlopen_with_retry(urllib.request.Request(ch_url), timeout=15).decode("utf-8"))
             if usage is not None:
-                bump_usage(usage, "yt_units", 1)  # channels.list costs 1 unit
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
             ch_items = ch_data.get("items", [])
             if ch_items:
                 subscriber_count = ch_items[0].get("statistics", {}).get("subscriberCount", "0")
@@ -722,7 +704,7 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usag
     try:
         data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         if usage is not None:
-            bump_usage(usage, "yt_units", 100)  # search.list costs 100 units
+            usage["yt_units"] = usage.get("yt_units", 0) + 100  # search.list costs 100 units
         items = data.get("items", [])
         if items:
             ch_id = items[0].get("snippet", {}).get("channelId", "")
@@ -757,7 +739,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
     try:
         data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
         if usage is not None:
-            bump_usage(usage, "yt_units", 1)  # channels.list costs 1 unit
+            usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
     except Exception as e:
         if progress_callback:
             progress_callback(f"    Failed to get channel info for {channel_id}: {e}")
@@ -805,7 +787,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         try:
             pl_data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
             if usage is not None:
-                bump_usage(usage, "yt_units", 1)  # playlistItems.list costs 1 unit
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # playlistItems.list costs 1 unit
         except Exception as e:
             had_error = True
             if progress_callback:
@@ -867,7 +849,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         try:
             vid_data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
             if usage is not None:
-                bump_usage(usage, "yt_units", 1)  # videos.list costs 1 unit
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # videos.list costs 1 unit
         except Exception as e:
             had_error = True
             if progress_callback:
@@ -1885,15 +1867,12 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
 
     completed_channels = 0
     total_channels_holder = {"total": 0}
-    progress_lock = threading.Lock()
 
     def channel_done():
         nonlocal completed_channels
-        with progress_lock:
-            completed_channels += 1
-            done = completed_channels
+        completed_channels += 1
         if progress_percent_callback:
-            progress_percent_callback(done, total_channels_holder["total"])
+            progress_percent_callback(completed_channels, total_channels_holder["total"])
 
     log("Au Date Result -> Channel Content Fetcher")
     log("=" * 55)
@@ -2014,204 +1993,167 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
     all_results = []
     failed_channels = {"youtube": [], "tiktok": [], "facebook": [], "instagram": [], "kick": []}
 
-    # Each of these fetches one channel and returns (result_rows, had_error) -
-    # they don't touch all_results/failed_channels/channel_done() themselves,
-    # so they're safe to run concurrently across threads (see
-    # FETCH_CONCURRENCY above); the caller applies their results to the
-    # shared state back on the main thread, one platform block at a time and
-    # in the channels' original order, so the final output is identical to
-    # running everything sequentially - only the waiting happens in parallel.
-
-    def fetch_one_youtube(ch):
-        try:
-            content_link = ch.get("content_link")
-            if content_link:
-                log(f"\n  Content link: {ch['channel_name']} (video {content_link['video_id']})")
-                videos, meta = fetch_youtube_single_video(
-                    content_link["video_id"], yt_api_key,
-                    progress_callback=log, usage=yt_usage
-                )
-            else:
-                log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
-                resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
-                videos, meta = fetch_youtube_channel_videos(
-                    resolved_id, yt_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log, usage=yt_usage
-                )
-            time.sleep(1)
-            return videos, meta.get("had_error", False)
-        except Exception as e:
-            log(f"    ERROR processing {ch['channel_name']}: {e}")
-            import traceback
-            log(f"    {traceback.format_exc()[:200]}")
-            return [], True
-
-    def fetch_one_tiktok(ch):
-        try:
-            content_link = ch.get("content_link")
-            if content_link:
-                log(f"\n  Content link: {ch['channel_name']} (@{content_link['username']}, video {content_link['video_id']})")
-                videos, meta = fetch_tiktok_channel_videos(
-                    content_link["username"], sc_api_key,
-                    progress_callback=log, target_video_id=content_link["video_id"]
-                )
-            else:
-                log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
-                videos, meta = fetch_tiktok_channel_videos(
-                    ch["channel_id"], sc_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
-                )
-            time.sleep(0.5)
-            return videos, meta.get("had_error", False)
-        except Exception as e:
-            log(f"    ERROR processing {ch['channel_name']}: {e}")
-            return [], True
-
-    def fetch_one_facebook(ch):
-        try:
-            content_link = ch.get("content_link")
-            if content_link and content_link.get("unsupported"):
-                log(f"\n  Content link: {ch['channel_name']} - facebook.com/reel/ and /watch/ URLs don't "
-                    f"include a page name, so which page to search can't be determined. Skipping (post_id={content_link['post_id']}).")
-                return [], True
-            if content_link:
-                log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id']})")
-                posts, meta = fetch_facebook_channel_posts(
-                    ch["channel_id"], sc_api_key,
-                    progress_callback=log, target_post_id=content_link["post_id"]
-                )
-            else:
-                log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
-                posts, meta = fetch_facebook_channel_posts(
-                    ch["channel_id"], sc_api_key,
-                    start_date=start_date, end_date=end_date, keywords=keywords,
-                    progress_callback=log
-                )
-            time.sleep(0.5)
-            return posts, meta.get("had_error", False)
-        except Exception as e:
-            log(f"    ERROR processing {ch['channel_name']}: {e}")
-            return [], True
-
-    def fetch_one_instagram(ch):
-        try:
-            content_link = ch.get("content_link")
-            if content_link and content_link.get("unsupported"):
-                log(f"\n  Content link: {ch['channel_name']} - Instagram post/reel URLs don't include a "
-                    f"username, so which profile to search can't be determined. Skipping (code={content_link['code']}).")
-                return [], True
-            log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
-            posts, meta = fetch_instagram_channel_posts(
-                ch["channel_id"], sc_api_key,
-                start_date=start_date, end_date=end_date, keywords=keywords,
-                progress_callback=log
-            )
-            time.sleep(0.5)
-            return posts, meta.get("had_error", False)
-        except Exception as e:
-            log(f"    ERROR processing {ch['channel_name']}: {e}")
-            return [], True
-
-    def fetch_one_kick(ch):
-        try:
-            content_link = ch.get("content_link")
-            if not content_link:
-                log(f"\n  {ch['channel_name']} - Kick only supports single-clip links "
-                    f"(kick.com/channel/clips/clip_xxx) for now, not whole-channel fetching. Skipping.")
-                return [], True
-            if content_link.get("unsupported"):
-                log(f"\n  Content link: {ch['channel_name']} - this is a Kick VOD URL "
-                    f"(kick.com/channel/videos/...), not a clip URL. ScrapeCreators' Kick API only "
-                    f"supports clip URLs (kick.com/channel/clips/clip_xxx) - VOD links return a server "
-                    f"error every time. Skipping.")
-                return [], True
-            log(f"\n  Content link: {ch['channel_name']} (kick clip)")
-            clips, meta = fetch_kick_clip(content_link["clip_url"], sc_api_key, progress_callback=log)
-            time.sleep(0.5)
-            return clips, meta.get("had_error", False)
-        except Exception as e:
-            log(f"    ERROR processing {ch['channel_name']}: {e}")
-            return [], True
-
-    with ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY) as executor:
-        # Log each platform's header and submit its jobs up front (in this
-        # fixed order) so the run's shape is visible right away, even though
-        # the actual fetching then proceeds concurrently in the background.
-        yt_futures = []
-        if yt_channels and yt_api_key:
-            log(f"\n--- Fetching YouTube channels ({len(yt_channels)}) ---")
-            yt_futures = [executor.submit(fetch_one_youtube, ch) for ch in yt_channels]
-        elif yt_channels and not yt_api_key:
-            log("\n  YouTube channels found but no API key. Skipping.")
-
-        tt_futures = []
-        if tt_channels and sc_api_key:
-            log(f"\n--- Fetching TikTok channels ({len(tt_channels)}) ---")
-            tt_futures = [executor.submit(fetch_one_tiktok, ch) for ch in tt_channels]
-        elif tt_channels and not sc_api_key:
-            log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
-
-        fb_futures = []
-        if fb_channels and sc_api_key:
-            log(f"\n--- Fetching Facebook pages ({len(fb_channels)}) ---")
-            fb_futures = [executor.submit(fetch_one_facebook, ch) for ch in fb_channels]
-        elif fb_channels and not sc_api_key:
-            log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
-
-        ig_futures = []
-        if ig_channels and sc_api_key:
-            log(f"\n--- Fetching Instagram accounts ({len(ig_channels)}) ---")
-            ig_futures = [executor.submit(fetch_one_instagram, ch) for ch in ig_channels]
-        elif ig_channels and not sc_api_key:
-            log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
-
-        kick_futures = []
-        if kick_channels and sc_api_key:
-            log(f"\n--- Fetching Kick clips ({len(kick_channels)}) ---")
-            kick_futures = [executor.submit(fetch_one_kick, ch) for ch in kick_channels]
-        elif kick_channels and not sc_api_key:
-            log("\n  Kick channels found but no ScrapeCreators API key. Skipping.")
-
-        # Drain results in the same fixed order (youtube, tiktok, facebook,
-        # instagram, kick) so all_results/failed_channels end up identical
-        # to the old fully-sequential run - .result() just waits for
-        # whichever of these is still in flight, most will already be done.
-        for ch, fut in zip(yt_channels, yt_futures):
-            videos, had_error = fut.result()
-            all_results.extend(videos)
-            if had_error:
+    # ---- Fetch YouTube channels ----
+    if yt_channels and yt_api_key:
+        log(f"\n--- Fetching YouTube channels ({len(yt_channels)}) ---")
+        for ch in yt_channels:
+            try:
+                content_link = ch.get("content_link")
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (video {content_link['video_id']})")
+                    videos, meta = fetch_youtube_single_video(
+                        content_link["video_id"], yt_api_key,
+                        progress_callback=log, usage=yt_usage
+                    )
+                else:
+                    log(f"\n  Channel: {ch['channel_name']} ({ch['channel_id']})")
+                    resolved_id = resolve_youtube_channel_id(ch["channel_id"], yt_api_key, progress_callback=log, usage=yt_usage)
+                    videos, meta = fetch_youtube_channel_videos(
+                        resolved_id, yt_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log, usage=yt_usage
+                    )
+                all_results.extend(videos)
+                if meta.get("had_error"):
+                    failed_channels["youtube"].append(ch["channel_name"])
+                time.sleep(1)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
+                import traceback
+                log(f"    {traceback.format_exc()[:200]}")
                 failed_channels["youtube"].append(ch["channel_name"])
-            channel_done()
+            finally:
+                channel_done()
+    elif yt_channels and not yt_api_key:
+        log("\n  YouTube channels found but no API key. Skipping.")
 
-        for ch, fut in zip(tt_channels, tt_futures):
-            videos, had_error = fut.result()
-            all_results.extend(videos)
-            if had_error:
+    # ---- Fetch TikTok channels ----
+    if tt_channels and sc_api_key:
+        log(f"\n--- Fetching TikTok channels ({len(tt_channels)}) ---")
+        for ch in tt_channels:
+            try:
+                content_link = ch.get("content_link")
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (@{content_link['username']}, video {content_link['video_id']})")
+                    videos, meta = fetch_tiktok_channel_videos(
+                        content_link["username"], sc_api_key,
+                        progress_callback=log, target_video_id=content_link["video_id"]
+                    )
+                else:
+                    log(f"\n  Channel: {ch['channel_name']} (@{ch['channel_id']})")
+                    videos, meta = fetch_tiktok_channel_videos(
+                        ch["channel_id"], sc_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log
+                    )
+                all_results.extend(videos)
+                if meta.get("had_error"):
+                    failed_channels["tiktok"].append(ch["channel_name"])
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
                 failed_channels["tiktok"].append(ch["channel_name"])
-            channel_done()
+            finally:
+                channel_done()
+    elif tt_channels and not sc_api_key:
+        log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
 
-        for ch, fut in zip(fb_channels, fb_futures):
-            posts, had_error = fut.result()
-            all_results.extend(posts)
-            if had_error:
+    # ---- Fetch Facebook channels ----
+    if fb_channels and sc_api_key:
+        log(f"\n--- Fetching Facebook pages ({len(fb_channels)}) ---")
+        for ch in fb_channels:
+            try:
+                content_link = ch.get("content_link")
+                if content_link and content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - facebook.com/reel/ and /watch/ URLs don't "
+                        f"include a page name, so which page to search can't be determined. Skipping (post_id={content_link['post_id']}).")
+                    failed_channels["facebook"].append(ch["channel_name"])
+                    continue
+                if content_link:
+                    log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id']})")
+                    posts, meta = fetch_facebook_channel_posts(
+                        ch["channel_id"], sc_api_key,
+                        progress_callback=log, target_post_id=content_link["post_id"]
+                    )
+                else:
+                    log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
+                    posts, meta = fetch_facebook_channel_posts(
+                        ch["channel_id"], sc_api_key,
+                        start_date=start_date, end_date=end_date, keywords=keywords,
+                        progress_callback=log
+                    )
+                all_results.extend(posts)
+                if meta.get("had_error"):
+                    failed_channels["facebook"].append(ch["channel_name"])
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
                 failed_channels["facebook"].append(ch["channel_name"])
-            channel_done()
+            finally:
+                channel_done()
+    elif fb_channels and not sc_api_key:
+        log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
 
-        for ch, fut in zip(ig_channels, ig_futures):
-            posts, had_error = fut.result()
-            all_results.extend(posts)
-            if had_error:
+    # ---- Fetch Instagram channels ----
+    if ig_channels and sc_api_key:
+        log(f"\n--- Fetching Instagram accounts ({len(ig_channels)}) ---")
+        for ch in ig_channels:
+            try:
+                content_link = ch.get("content_link")
+                if content_link and content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - Instagram post/reel URLs don't include a "
+                        f"username, so which profile to search can't be determined. Skipping (code={content_link['code']}).")
+                    failed_channels["instagram"].append(ch["channel_name"])
+                    continue
+                log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
+                posts, meta = fetch_instagram_channel_posts(
+                    ch["channel_id"], sc_api_key,
+                    start_date=start_date, end_date=end_date, keywords=keywords,
+                    progress_callback=log
+                )
+                all_results.extend(posts)
+                if meta.get("had_error"):
+                    failed_channels["instagram"].append(ch["channel_name"])
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
                 failed_channels["instagram"].append(ch["channel_name"])
-            channel_done()
+            finally:
+                channel_done()
+    elif ig_channels and not sc_api_key:
+        log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
 
-        for ch, fut in zip(kick_channels, kick_futures):
-            clips, had_error = fut.result()
-            all_results.extend(clips)
-            if had_error:
+    # ---- Fetch Kick clips ----
+    if kick_channels and sc_api_key:
+        log(f"\n--- Fetching Kick clips ({len(kick_channels)}) ---")
+        for ch in kick_channels:
+            try:
+                content_link = ch.get("content_link")
+                if not content_link:
+                    log(f"\n  {ch['channel_name']} - Kick only supports single-clip links "
+                        f"(kick.com/channel/clips/clip_xxx) for now, not whole-channel fetching. Skipping.")
+                    failed_channels["kick"].append(ch["channel_name"])
+                    continue
+                if content_link.get("unsupported"):
+                    log(f"\n  Content link: {ch['channel_name']} - this is a Kick VOD URL "
+                        f"(kick.com/channel/videos/...), not a clip URL. ScrapeCreators' Kick API only "
+                        f"supports clip URLs (kick.com/channel/clips/clip_xxx) - VOD links return a server "
+                        f"error every time. Skipping.")
+                    failed_channels["kick"].append(ch["channel_name"])
+                    continue
+                log(f"\n  Content link: {ch['channel_name']} (kick clip)")
+                clips, meta = fetch_kick_clip(content_link["clip_url"], sc_api_key, progress_callback=log)
+                all_results.extend(clips)
+                if meta.get("had_error"):
+                    failed_channels["kick"].append(ch["channel_name"])
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"    ERROR processing {ch['channel_name']}: {e}")
                 failed_channels["kick"].append(ch["channel_name"])
-            channel_done()
+            finally:
+                channel_done()
+    elif kick_channels and not sc_api_key:
+        log("\n  Kick channels found but no ScrapeCreators API key. Skipping.")
 
     if should_continue is not None and not should_continue():
         log("\n  Aborting: this run was superseded (reclaimed as stale, or reset) - not writing to the Sheet.")
