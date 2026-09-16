@@ -167,6 +167,24 @@ def test_matches_keywords_short_keyword_still_requires_word_boundary():
     assert matches_keywords("this is the MAIN feature", ["AI"]) is False
 
 
+def test_matches_keywords_thai_keyword_ending_in_combining_vowel():
+    # \b treats Thai combining vowels/tone marks (e.g. the ี in ของดี) as
+    # non-word characters, so a plain \b...\b regex never finds a boundary
+    # here even with spaces on both sides - this must fall back to substring
+    # matching for Thai instead of silently missing a real match.
+    assert matches_keywords("ซื้อ ของดี วันนี้", ["ของดี"]) is True
+
+
+def test_matches_keywords_thai_keyword_embedded_no_spaces():
+    # Thai doesn't put spaces between words at all, so the keyword can be
+    # directly adjacent to other Thai text with no delimiter whatsoever.
+    assert matches_keywords("ซื้อของดีวันนี้เลยด่วน", ["ของดี"]) is True
+
+
+def test_matches_keywords_thai_keyword_not_present():
+    assert matches_keywords("วันนี้อากาศดี", ["ของดี"]) is False
+
+
 # ---- format_duration ----
 
 def test_format_duration_minutes_and_seconds_round_up():
