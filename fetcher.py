@@ -1678,6 +1678,9 @@ def get_scrapecreators_credit_balance(api_key, progress_callback=None):
 # UTILITY FUNCTIONS
 # ============================================================================
 
+_THAI_CHAR_RE = re.compile(r'[฀-๿]')
+
+
 def matches_keywords(text, keywords):
     """Check if text contains any of the keywords as a whole word, case-insensitive.
 
@@ -1692,6 +1695,19 @@ def matches_keywords(text, keywords):
     stripped from both sides. Restricted to keywords of 8+ characters
     (after stripping spaces) to avoid short keywords matching inside
     unrelated concatenated substrings once boundaries are gone.
+
+    Thai keywords skip the \\b word-boundary check and go straight to plain
+    substring matching. Python's \\b only fires at a transition to/from a
+    "word" character, and Thai's combining vowel/tone marks (สระลอย/
+    วรรณยุกต์ - e.g. ี ั ึ ื ่ ้) don't count as one - so a keyword ending or
+    starting with one (extremely common in Thai) would never find a
+    boundary and silently fail to match even when clearly present in the
+    text. Thai also has no spaces between words at all, so a "word
+    boundary" isn't a meaningful concept for it the way it is for
+    space-delimited scripts - plain substring matching is the right
+    trade-off (occasionally over-matches a short keyword inside an
+    unrelated word, but that's far less costly here than silently
+    dropping a post that should have matched).
     """
     if not keywords:
         return True
@@ -1700,6 +1716,10 @@ def matches_keywords(text, keywords):
     for kw in keywords:
         for candidate in {kw.lower(), kw.lower().lstrip('#')}:
             if not candidate:
+                continue
+            if _THAI_CHAR_RE.search(candidate):
+                if candidate in text_lower:
+                    return True
                 continue
             if re.search(r'\b' + re.escape(candidate) + r'\b', text_lower):
                 return True
