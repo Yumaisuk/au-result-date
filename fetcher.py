@@ -860,7 +860,6 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
         for item in vid_data.get("items", []):
             snippet = item.get("snippet", {})
             title = snippet.get("title", "")
-            description = snippet.get("description", "")
             published_date = format_published_date(snippet.get("publishedAt", ""))
 
             # Date filter (proper datetime comparison, not string)
@@ -873,10 +872,16 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if end_dt and published_dt and published_dt > end_dt:
                 continue
 
-            # Keyword filter (case-insensitive, match title OR description -
-            # a campaign keyword often only appears in the description, e.g.
-            # a pinned hashtag/link, not the title itself)
-            if keywords and not matches_keywords(f"{title}\n{description}", keywords):
+            # Keyword filter (case-insensitive, title only - not description).
+            # Matching the description too sounds more complete, but YouTube
+            # descriptions are mostly boilerplate reused across every upload
+            # (sponsor blocks, social links, a wall of hashtags) regardless
+            # of that video's actual topic - confirmed live: a "POE2" keyword
+            # pulled in unrelated streams whose description just happened to
+            # carry a leftover "#poe2" hashtag or an old item-filter link.
+            # The title is what the creator wrote specifically for this
+            # video, so it's the only reliable relevance signal here.
+            if keywords and not matches_keywords(title, keywords):
                 continue
 
             matched_videos.append(_youtube_video_item_to_dict(item, channel_title, subscriber_count))
