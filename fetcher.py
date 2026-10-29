@@ -229,6 +229,68 @@ def extract_channel_id(raw_id, platform):
     return raw_id
 
 
+_FB_RESERVED_FIRST_SEGMENTS = {
+    "reel", "reels", "watch", "share", "groups", "photo", "photo.php",
+    "permalink.php", "story.php", "profile.php", "pages", "events",
+    "people", "stories", "hashtag", "marketplace", "login", "l.php",
+}
+
+
+def _detect_facebook_content_link(raw_id):
+    """Recognize any Facebook URL that points at one specific post/video/
+    reel (as opposed to a page/profile), in every shape Facebook uses:
+    /Page/posts/{id or pfbid...}, /Page/videos/{id}, /reel/{id},
+    /watch/?v={id}, /share/p|v|r/{token}, permalink.php?story_fbid=...,
+    story.php?story_fbid=..., photo.php?fbid=..., group posts, fb.watch/...
+
+    Returns {"post_url": <the URL as given>, "post_id": <numeric id when the
+    URL spells one out, else "">, "page_slug": <page name when the URL has
+    one in the standard /Page/posts|videos/{id} shape, else "">}, or None for
+    a plain page/profile link. The full URL is what gets sent to
+    ScrapeCreators' single-post endpoint, so the page name and numeric id are
+    only needed for the slower scan-the-page fallback.
+    """
+    parsed = urllib.parse.urlparse(raw_id)
+    host = parsed.netloc.lower()
+    if host == "fb.watch":
+        return {"post_url": raw_id, "post_id": "", "page_slug": ""}
+    if "facebook.com" not in host:
+        return None
+
+    segs = [s for s in parsed.path.split("/") if s]
+    query = urllib.parse.parse_qs(parsed.query)
+    first = segs[0].lower() if segs else ""
+
+    is_item = (
+        (first == "reel" and len(segs) >= 2)
+        or (first == "watch" and "v" in query)
+        or (first == "share" and len(segs) >= 2)
+        or (first in ("permalink.php", "story.php") and "story_fbid" in query)
+        or (first in ("photo", "photo.php") and "fbid" in query)
+        or (first == "groups" and len(segs) >= 4 and segs[2].lower() in ("posts", "permalink"))
+        or (len(segs) >= 3 and segs[1].lower() in ("posts", "videos", "photos", "reel", "reels"))
+    )
+    if not is_item:
+        return None
+
+    post_id = ""
+    match = re.search(r'/(?:posts|videos|reel|reels)/(\d{6,})', parsed.path)
+    if match:
+        post_id = match.group(1)
+    else:
+        for key in ("v", "story_fbid", "fbid"):
+            value = (query.get(key) or [""])[0]
+            if value.isdigit():
+                post_id = value
+                break
+
+    page_slug = ""
+    if post_id and len(segs) >= 3 and segs[1].lower() in ("posts", "videos") and first not in _FB_RESERVED_FIRST_SEGMENTS:
+        page_slug = segs[0]
+
+    return {"post_url": raw_id, "post_id": post_id, "page_slug": page_slug}
+
+
 def detect_content_link(raw_id, platform):
     """Detect if a Channel KOLs row's URL points at one specific video/post
     rather than a whole channel/profile, so it can be fetched directly and
@@ -268,22 +330,7 @@ def detect_content_link(raw_id, platform):
         return None
 
     if platform_lower == "facebook":
-        # facebook.com/reel/{id} and facebook.com/watch/?v={id} are "global
-        # feed" URLs with no page name in the path at all - unlike
-        # facebook.com/PageName/posts/{id}, there's nothing here to tell us
-        # which page to search (same fundamental issue as Instagram above,
-        # and unlike TikTok's short-links, there's no unauthenticated way to
-        # resolve it either - Facebook's public oEmbed endpoint is dead).
-        if re.search(r'facebook\.com/reel/(\d+)', raw_id) or re.search(r'facebook\.com/watch/?\?v=(\d+)', raw_id):
-            match = re.search(r'(\d{6,})', raw_id)
-            if match:
-                return {"post_id": match.group(1), "unsupported": True}
-            return None
-        if any(seg in raw_id for seg in ("/posts/", "/videos/")):
-            match = re.search(r'(\d{6,})', raw_id)
-            if match:
-                return {"post_id": match.group(1)}
-        return None
+        return _detect_facebook_content_link(raw_id)
 
     if platform_lower == "kick":
         # ScrapeCreators only has a single-clip lookup for Kick (no
@@ -1110,6 +1157,158 @@ def fetch_tiktok_channel_videos(username, api_key, start_date=None, end_date=Non
 # FACEBOOK - ScrapeCreators API
 # ============================================================================
 
+def _facebook_shares_enabled():
+    """Fetching share counts for page-wide results costs one extra API call
+    (credit + a few seconds) per matched post, so it can be switched off with
+    FACEBOOK_FETCH_SHARES=0 in the environment without touching the code."""
+    return os.environ.get("FACEBOOK_FETCH_SHARES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _count_str(value):
+    return "" if value is None else str(value)
+
+
+def fetch_facebook_post_details(post_url, api_key, progress_callback=None):
+    """Look up one Facebook post/video/reel by its URL.
+
+    Uses ScrapeCreators API: GET /v1/facebook/post?url=...
+    Unlike the page-posts listing this returns share_count, and it accepts
+    any post/reel/watch URL directly (no page name needed). Returns the
+    parsed JSON dict, or None if the lookup failed.
+    """
+    url = f"{SC_API_BASE}/v1/facebook/post?url={urllib.parse.quote(post_url, safe='')}"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key}, method="GET")
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=30).decode("utf-8"))
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"    Failed to fetch Facebook post {post_url}: {e}")
+        return None
+    if not isinstance(data, dict) or data.get("success") is False:
+        if progress_callback:
+            progress_callback(f"    Facebook post lookup returned no data for {post_url}")
+        return None
+    return data
+
+
+def _facebook_profile_info(profile_url, api_key):
+    """Best-effort (name, follower_count) for a profile/page URL; blanks on failure."""
+    url = f"{SC_API_BASE}/v1/facebook/profile?url={urllib.parse.quote(profile_url, safe='')}"
+    req = urllib.request.Request(url, headers={"x-api-key": api_key}, method="GET")
+    try:
+        data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
+    except Exception:
+        return "", ""
+    follower_count = data.get("followerCount")
+    return data.get("name", ""), (str(follower_count) if follower_count else "")
+
+
+def fetch_facebook_content_link(content_link, api_key, progress_callback=None):
+    """Fetch the one specific Facebook post/video/reel a Channel KOLs row
+    points at: likes, comments, shares and (for videos) views.
+
+    Tries the single-post endpoint first (exact, one call, has shares, works
+    for reel/watch/share links). If that fails and the URL is the classic
+    /Page/posts|videos/{id} shape, falls back to scanning that page's recent
+    posts for the id (no share count there).
+
+    Returns (list_of_0_or_1_post_dict, channel_meta).
+    """
+    post_url = content_link["post_url"]
+    details = fetch_facebook_post_details(post_url, api_key, progress_callback)
+
+    if details is not None:
+        author = details.get("author") or {}
+        channel_name = author.get("name") or author.get("handle") or ""
+        subscriber_count = "0"
+        if author.get("url"):
+            time.sleep(0.5)
+            profile_name, followers = _facebook_profile_info(author["url"], api_key)
+            channel_name = channel_name or profile_name
+            subscriber_count = followers or subscriber_count
+
+        video = details.get("video") or {}
+        view_count = details.get("view_count")
+        is_reel = "/reel/" in post_url or "/reel/" in (details.get("url") or "")
+        if is_reel:
+            content_type = "Short"
+        elif video or view_count is not None:
+            content_type = "VOD"
+        else:
+            content_type = "Post"
+
+        duration = ""
+        length_seconds = video.get("length_in_second")
+        if isinstance(length_seconds, (int, float)) and length_seconds:
+            minutes = int(length_seconds) // 60
+            if int(length_seconds) % 60 > 0:
+                minutes += 1
+            duration = str(minutes)
+
+        post_dict = {
+            "channel_name": channel_name,
+            "subscribers": subscriber_count,
+            "platform": "facebook",
+            "link": post_url,
+            "content_type": content_type,
+            "published_date": format_published_date(details.get("creation_time", "")),
+            "views": "" if not view_count else str(view_count),
+            "likes": _count_str(details.get("like_count")),
+            "comments": _count_str(details.get("comment_count")),
+            "shares": _count_str(details.get("share_count")),
+            "saves": "",
+            "duration": duration,
+            "caption": details.get("description") or "",
+        }
+        if progress_callback:
+            progress_callback(f"    Fetched Facebook post directly: {post_dict['caption'][:60]}")
+        return [post_dict], {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": False}
+
+    if content_link.get("page_slug") and content_link.get("post_id"):
+        if progress_callback:
+            progress_callback(f"    Single-post lookup failed - falling back to scanning {content_link['page_slug']}'s recent posts")
+        return fetch_facebook_channel_posts(
+            content_link["page_slug"], api_key,
+            progress_callback=progress_callback, target_post_id=content_link["post_id"]
+        )
+
+    return [], {"had_error": True}
+
+
+def _add_facebook_share_counts(posts, api_key, progress_callback=None):
+    """Fill in share counts (and missing view counts) on page-wide results by
+    looking each matched post up individually - the page listing doesn't
+    include shares. Stops early after 3 failures in a row so a broken
+    endpoint or an empty credit balance doesn't burn time on every post."""
+    started = time.time()
+    filled = 0
+    consecutive_failures = 0
+    for i, post in enumerate(posts, start=1):
+        if not post.get("link"):
+            continue
+        if i > 1:
+            time.sleep(0.5)
+        # Logged per post so the run keeps reporting progress (a long batch
+        # of silent lookups would look "stuck" to run_manager's heartbeat).
+        if progress_callback:
+            progress_callback(f"    Fetching share count {i}/{len(posts)}")
+        details = fetch_facebook_post_details(post["link"], api_key)
+        if details is None:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                if progress_callback:
+                    progress_callback("    3 share lookups failed in a row - skipping the rest")
+                break
+            continue
+        consecutive_failures = 0
+        post["shares"] = _count_str(details.get("share_count"))
+        if not post.get("views") and details.get("view_count"):
+            post["views"] = str(details["view_count"])
+        filled += 1
+    if progress_callback:
+        progress_callback(f"    Share counts fetched for {filled}/{len(posts)} posts in {time.time() - started:.0f}s")
+
+
 def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None, target_post_id=None):
     """Fetch posts from a Facebook page via ScrapeCreators API, filter by date and keywords.
 
@@ -1291,6 +1490,9 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
             progress_callback(f"    Target post {target_post_id} not found in the last {max_pages} pages for {channel_name}")
     elif progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} posts from {channel_name}")
+
+    if matched_posts and not target_post_id and _facebook_shares_enabled():
+        _add_facebook_share_counts(matched_posts, api_key, progress_callback)
 
     channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
     return matched_posts, channel_meta
@@ -2089,17 +2291,9 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
         for ch in fb_channels:
             try:
                 content_link = ch.get("content_link")
-                if content_link and content_link.get("unsupported"):
-                    log(f"\n  Content link: {ch['channel_name']} - facebook.com/reel/ and /watch/ URLs don't "
-                        f"include a page name, so which page to search can't be determined. Skipping (post_id={content_link['post_id']}).")
-                    failed_channels["facebook"].append(ch["channel_name"])
-                    continue
                 if content_link:
-                    log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id']})")
-                    posts, meta = fetch_facebook_channel_posts(
-                        ch["channel_id"], sc_api_key,
-                        progress_callback=log, target_post_id=content_link["post_id"]
-                    )
+                    log(f"\n  Content link: {ch['channel_name']} (post {content_link['post_id'] or content_link['post_url']})")
+                    posts, meta = fetch_facebook_content_link(content_link, sc_api_key, progress_callback=log)
                 else:
                     log(f"\n  Page: {ch['channel_name']} ({ch['channel_id']})")
                     posts, meta = fetch_facebook_channel_posts(
