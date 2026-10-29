@@ -1233,9 +1233,13 @@ def fetch_facebook_content_link(content_link, api_key, progress_callback=None):
         video = details.get("video") or {}
         view_count = details.get("view_count")
         is_reel = "/reel/" in post_url or "/reel/" in (details.get("url") or "")
+        # Photo/text posts can still come back with an empty "video" object or
+        # a view_count of 0, so only count real video fields or a non-zero
+        # view count - otherwise every photo post got labelled "VOD".
+        has_video = any(video.get(k) for k in ("id", "sd_url", "hd_url", "length_in_second")) or bool(view_count)
         if is_reel:
             content_type = "Short"
-        elif video or view_count is not None:
+        elif has_video:
             content_type = "VOD"
         else:
             content_type = "Post"
