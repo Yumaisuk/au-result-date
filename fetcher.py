@@ -405,6 +405,7 @@ def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
         # TikTok share short-links (vt.tiktok.com/vm.tiktok.com) don't
         # contain a @username or video ID at all - resolve to the
         # canonical URL first so the parsing below can actually work.
+        original_link = channel_id_raw.strip()
         if platform_key == "tiktok":
             channel_id_raw = resolve_tiktok_short_url(channel_id_raw, progress_callback=progress_callback)
 
@@ -416,6 +417,8 @@ def read_channel_list(sheets_service, channel_tab_name, progress_callback=None):
             "channel_name": channel_name.strip(),
             "platform": platform_key,
             "channel_id": channel_id.strip(),
+            "raw_link": original_link,
+            "order": len(channels),
         }
         if content_link:
             channel_entry["content_link"] = content_link
@@ -1979,6 +1982,32 @@ def format_published_date(published):
         return published[:10] if len(published) >= 10 else published
 
 
+def make_error_row(ch, reason=""):
+    """Placeholder result row for a Channel KOLs entry that couldn't be
+    fetched, so it still appears in the report at its own position: the
+    name from the sheet, "Error" in the Link column, and the link that was
+    pasted (plus why it failed) in the Caption column."""
+    caption = f"ลิงก์เดิม: {ch.get('raw_link') or ch.get('channel_id', '')}"
+    if reason:
+        caption += f" | {reason}"
+    return {
+        "channel_name": ch["channel_name"],
+        "subscribers": "",
+        "platform": ch["platform"],
+        "link": "Error",
+        "content_type": "",
+        "published_date": "",
+        "views": "",
+        "likes": "",
+        "comments": "",
+        "shares": "",
+        "saves": "",
+        "duration": "",
+        "caption": caption,
+        "order": ch.get("order", 0),
+    }
+
+
 # ============================================================================
 # WRITE RESULTS TO SHEET
 # ============================================================================
@@ -2224,6 +2253,17 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
     all_results = []
     failed_channels = {"youtube": [], "tiktok": [], "facebook": [], "instagram": [], "kick": []}
 
+    def add_results(items, ch):
+        # Tag each row with its Channel KOLs row position so the output can
+        # be sorted back into that order at the end.
+        for item in items:
+            item["order"] = ch.get("order", 0)
+        all_results.extend(items)
+
+    def add_error(ch, platform, reason):
+        failed_channels[platform].append(ch["channel_name"])
+        all_results.append(make_error_row(ch, reason))
+
     # ---- Fetch YouTube channels ----
     if yt_channels and yt_api_key:
         log(f"\n--- Fetching YouTube channels ({len(yt_channels)}) ---")
@@ -2244,19 +2284,22 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                         start_date=start_date, end_date=end_date, keywords=keywords,
                         progress_callback=log, usage=yt_usage
                     )
-                all_results.extend(videos)
+                add_results(videos, ch)
                 if meta.get("had_error"):
-                    failed_channels["youtube"].append(ch["channel_name"])
+                    add_error(ch, "youtube", "ดึงข้อมูลไม่สำเร็จ")
                 time.sleep(1)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
                 import traceback
                 log(f"    {traceback.format_exc()[:200]}")
-                failed_channels["youtube"].append(ch["channel_name"])
+                add_error(ch, "youtube", f"เกิดข้อผิดพลาด: {e}")
             finally:
                 channel_done()
     elif yt_channels and not yt_api_key:
         log("\n  YouTube channels found but no API key. Skipping.")
+        for ch in yt_channels:
+            add_error(ch, "youtube", "ไม่มี YouTube API key")
+            channel_done()
 
     # ---- Fetch TikTok channels ----
     if tt_channels and sc_api_key:
@@ -2277,17 +2320,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                         start_date=start_date, end_date=end_date, keywords=keywords,
                         progress_callback=log
                     )
-                all_results.extend(videos)
+                add_results(videos, ch)
                 if meta.get("had_error"):
-                    failed_channels["tiktok"].append(ch["channel_name"])
+                    add_error(ch, "tiktok", "ดึงข้อมูลไม่สำเร็จ")
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-                failed_channels["tiktok"].append(ch["channel_name"])
+                add_error(ch, "tiktok", f"เกิดข้อผิดพลาด: {e}")
             finally:
                 channel_done()
     elif tt_channels and not sc_api_key:
         log("\n  TikTok channels found but no ScrapeCreators API key. Skipping.")
+        for ch in tt_channels:
+            add_error(ch, "tiktok", "ไม่มี ScrapeCreators API key")
+            channel_done()
 
     # ---- Fetch Facebook channels ----
     if fb_channels and sc_api_key:
@@ -2305,17 +2351,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                         start_date=start_date, end_date=end_date, keywords=keywords,
                         progress_callback=log
                     )
-                all_results.extend(posts)
+                add_results(posts, ch)
                 if meta.get("had_error"):
-                    failed_channels["facebook"].append(ch["channel_name"])
+                    add_error(ch, "facebook", "ดึงข้อมูลไม่สำเร็จ")
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-                failed_channels["facebook"].append(ch["channel_name"])
+                add_error(ch, "facebook", f"เกิดข้อผิดพลาด: {e}")
             finally:
                 channel_done()
     elif fb_channels and not sc_api_key:
         log("\n  Facebook channels found but no ScrapeCreators API key. Skipping.")
+        for ch in fb_channels:
+            add_error(ch, "facebook", "ไม่มี ScrapeCreators API key")
+            channel_done()
 
     # ---- Fetch Instagram channels ----
     if ig_channels and sc_api_key:
@@ -2326,7 +2375,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                 if content_link and content_link.get("unsupported"):
                     log(f"\n  Content link: {ch['channel_name']} - Instagram post/reel URLs don't include a "
                         f"username, so which profile to search can't be determined. Skipping (code={content_link['code']}).")
-                    failed_channels["instagram"].append(ch["channel_name"])
+                    add_error(ch, "instagram", "ลิงก์นี้ไม่รองรับ (ไม่มี username ในลิงก์)")
                     continue
                 log(f"\n  Account: {ch['channel_name']} (@{ch['channel_id']})")
                 posts, meta = fetch_instagram_channel_posts(
@@ -2334,17 +2383,20 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                     start_date=start_date, end_date=end_date, keywords=keywords,
                     progress_callback=log
                 )
-                all_results.extend(posts)
+                add_results(posts, ch)
                 if meta.get("had_error"):
-                    failed_channels["instagram"].append(ch["channel_name"])
+                    add_error(ch, "instagram", "ดึงข้อมูลไม่สำเร็จ")
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-                failed_channels["instagram"].append(ch["channel_name"])
+                add_error(ch, "instagram", f"เกิดข้อผิดพลาด: {e}")
             finally:
                 channel_done()
     elif ig_channels and not sc_api_key:
         log("\n  Instagram channels found but no ScrapeCreators API key. Skipping.")
+        for ch in ig_channels:
+            add_error(ch, "instagram", "ไม่มี ScrapeCreators API key")
+            channel_done()
 
     # ---- Fetch Kick clips ----
     if kick_channels and sc_api_key:
@@ -2355,28 +2407,38 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
                 if not content_link:
                     log(f"\n  {ch['channel_name']} - Kick only supports single-clip links "
                         f"(kick.com/channel/clips/clip_xxx) for now, not whole-channel fetching. Skipping.")
-                    failed_channels["kick"].append(ch["channel_name"])
+                    add_error(ch, "kick", "Kick รองรับเฉพาะลิงก์คลิปเดี่ยวเท่านั้น")
                     continue
                 if content_link.get("unsupported"):
                     log(f"\n  Content link: {ch['channel_name']} - this is a Kick VOD URL "
                         f"(kick.com/channel/videos/...), not a clip URL. ScrapeCreators' Kick API only "
                         f"supports clip URLs (kick.com/channel/clips/clip_xxx) - VOD links return a server "
                         f"error every time. Skipping.")
-                    failed_channels["kick"].append(ch["channel_name"])
+                    add_error(ch, "kick", "ลิงก์นี้เป็น VOD ไม่ใช่คลิป ไม่รองรับ")
                     continue
                 log(f"\n  Content link: {ch['channel_name']} (kick clip)")
                 clips, meta = fetch_kick_clip(content_link["clip_url"], sc_api_key, progress_callback=log)
-                all_results.extend(clips)
+                add_results(clips, ch)
                 if meta.get("had_error"):
-                    failed_channels["kick"].append(ch["channel_name"])
+                    add_error(ch, "kick", "ดึงข้อมูลไม่สำเร็จ")
                 time.sleep(0.5)
             except Exception as e:
                 log(f"    ERROR processing {ch['channel_name']}: {e}")
-                failed_channels["kick"].append(ch["channel_name"])
+                add_error(ch, "kick", f"เกิดข้อผิดพลาด: {e}")
             finally:
                 channel_done()
     elif kick_channels and not sc_api_key:
         log("\n  Kick channels found but no ScrapeCreators API key. Skipping.")
+        for ch in kick_channels:
+            add_error(ch, "kick", "ไม่มี ScrapeCreators API key")
+            channel_done()
+
+    # Reorder to match the Channel KOLs row order (stable sort keeps one
+    # channel's own results in fetched order) so the report lines up with
+    # the input list for copy/paste.
+    all_results.sort(key=lambda r: r.get("order", 0))
+    for r in all_results:
+        r.pop("order", None)
 
     if should_continue is not None and not should_continue():
         log("\n  Aborting: this run was superseded (reclaimed as stale, or reset) - not writing to the Sheet.")

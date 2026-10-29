@@ -345,6 +345,28 @@ def test_detect_content_link_plain_handle_is_not_content():
     assert detect_content_link("UCQ_S28L6WmCl6LWnnv90C9g", "youtube") is None
 
 
+# ---- make_error_row ----
+
+def test_make_error_row_has_sheet_name_error_in_link_and_original_link_in_caption():
+    from fetcher import make_error_row
+    ch = {"channel_name": "JJamx", "platform": "facebook", "channel_id": "x",
+          "raw_link": "https://www.facebook.com/share/p/abc/", "order": 4}
+    row = make_error_row(ch, "ดึงข้อมูลไม่สำเร็จ")
+    assert row["channel_name"] == "JJamx"
+    assert row["platform"] == "facebook"
+    assert row["link"] == "Error"
+    assert "https://www.facebook.com/share/p/abc/" in row["caption"]
+    assert "ดึงข้อมูลไม่สำเร็จ" in row["caption"]
+    assert row["order"] == 4
+
+
+def test_make_error_row_falls_back_to_channel_id_without_raw_link():
+    from fetcher import make_error_row
+    row = make_error_row({"channel_name": "A", "platform": "youtube", "channel_id": "someid"})
+    assert "someid" in row["caption"]
+    assert row["order"] == 0
+
+
 # ---- fetch_facebook_content_link ----
 
 def _fb_row(details, url="https://www.facebook.com/permalink.php?story_fbid=pfbid0abc&id=1"):

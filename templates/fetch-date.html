@@ -260,7 +260,9 @@
                 const pIcon = icons[r.platform] || '❓';
 
                 const captionShort = (r.caption || '').length > 50 ? (r.caption || '').substring(0, 50) + '...' : (r.caption || '');
-                const linkHtml = r.link ? `<a href="${escapeHtml(r.link)}" target="_blank" class="table-link">Open</a>` : '';
+                const linkHtml = !r.link ? ''
+                    : /^https?:\/\//.test(r.link) ? `<a href="${escapeHtml(r.link)}" target="_blank" class="table-link">Open</a>`
+                    : escapeHtml(r.link);
 
                 tr.innerHTML = `
                     <td>${escapeHtml(r.channel_name || '')}</td>
