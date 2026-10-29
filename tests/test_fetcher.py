@@ -345,6 +345,45 @@ def test_detect_content_link_plain_handle_is_not_content():
     assert detect_content_link("UCQ_S28L6WmCl6LWnnv90C9g", "youtube") is None
 
 
+# ---- fetch_facebook_content_link ----
+
+def _fb_row(details, url="https://www.facebook.com/permalink.php?story_fbid=pfbid0abc&id=1"):
+    from unittest import mock
+    import fetcher
+    link = fetcher.detect_content_link(url, "facebook")
+    with mock.patch.object(fetcher, "fetch_facebook_post_details", return_value=details):
+        posts, meta = fetcher.fetch_facebook_content_link(link, "KEY")
+    return posts, meta
+
+
+def test_facebook_content_link_photo_post_is_not_labelled_vod():
+    details = {"success": True, "like_count": 10, "comment_count": 2, "share_count": 3,
+               "view_count": 0, "video": {"id": None, "sd_url": None}, "description": "photo",
+               "creation_time": "2026-10-28T03:00:00.000Z", "author": {"name": "Someone"}}
+    posts, meta = _fb_row(details)
+    assert posts[0]["content_type"] == "Post"
+    assert posts[0]["views"] == ""
+    assert (posts[0]["likes"], posts[0]["comments"], posts[0]["shares"]) == ("10", "2", "3")
+    assert meta["had_error"] is False
+
+
+def test_facebook_content_link_video_post_is_vod_with_views():
+    details = {"success": True, "like_count": 10, "comment_count": 2, "share_count": 3,
+               "view_count": 5000, "video": {"id": "1", "length_in_second": 125.0},
+               "creation_time": "2026-10-28T03:00:00.000Z", "author": {"name": "Someone"}}
+    posts, _ = _fb_row(details, "https://www.facebook.com/somepage/videos/123456789012")
+    assert posts[0]["content_type"] == "VOD"
+    assert posts[0]["views"] == "5000"
+    assert posts[0]["duration"] == "3"
+
+
+def test_facebook_content_link_reel_is_short():
+    details = {"success": True, "like_count": 1, "comment_count": 1, "share_count": 1,
+               "view_count": 99, "video": {"id": "1"}, "author": {"name": "Someone"}}
+    posts, _ = _fb_row(details, "https://www.facebook.com/reel/1464406115597705")
+    assert posts[0]["content_type"] == "Short"
+
+
 # ---- resolve_tiktok_short_url ----
 
 def test_resolve_tiktok_short_url_passthrough_for_normal_url():
