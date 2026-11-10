@@ -57,6 +57,7 @@ def run():
                     "success": result.get("success", False),
                     "total_rows": result.get("total_rows", 0),
                     "error": result.get("error"),
+                    "warning": result.get("warning"),
                 }
                 yield f"data: {json.dumps({'type': 'complete', 'result': summary})}\n\n"
                 break

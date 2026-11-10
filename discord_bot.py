@@ -90,6 +90,8 @@ class ControlPanelView(discord.ui.View):
             lines = [f"👤 เริ่มโดย: {started_by}", f"⏱️ ใช้เวลาทั้งหมด: {elapsed}"]
             if result.get("success"):
                 lines.append(f"✅ เสร็จสิ้น! ดึงข้อมูลได้ {result.get('total_rows', 0)} รายการ")
+                if result.get("warning"):
+                    lines.append(f"⚠️ {result['warning']}")
                 sc_credits = result.get("sc_credits_remaining")
                 if sc_credits is not None:
                     lines.append(f"🎟️ ScrapeCreators เครดิตคงเหลือ: {sc_credits}")
@@ -106,7 +108,7 @@ class ControlPanelView(discord.ui.View):
                 lines.append("ดูผลลัพธ์ได้ที่ Google Sheet")
             else:
                 lines.append(f"❌ เกิดข้อผิดพลาด: {result.get('error')}")
-            asyncio.run_coroutine_threadsafe(_safe_edit(message, "\n".join(lines)), loop)
+            asyncio.run_coroutine_threadsafe(_safe_edit(message, "\n".join(lines), interaction), loop)
 
         started = run_manager.start_run(
             progress_callback, done_callback, progress_percent_callback, started_by=started_by
@@ -117,7 +119,7 @@ class ControlPanelView(discord.ui.View):
             return
 
         my_run_id = run_manager.state["run_id"]
-        asyncio.create_task(_periodic_update(message, progress, started_by, started_at, my_run_id))
+        asyncio.create_task(_periodic_update(message, progress, started_by, started_at, my_run_id, interaction))
         asyncio.create_task(_repost_panel(channel))
 
 
@@ -134,7 +136,7 @@ def _format_elapsed(delta):
     return f"{seconds} วินาที"
 
 
-async def _periodic_update(message, progress, started_by, started_at, my_run_id):
+async def _periodic_update(message, progress, started_by, started_at, my_run_id, interaction=None):
     def is_my_run_active():
         return run_manager.state["running"] and run_manager.state["run_id"] == my_run_id
 
@@ -150,14 +152,33 @@ async def _periodic_update(message, progress, started_by, started_at, my_run_id)
             message,
             f"👤 เริ่มโดย: {started_by}\n⏱️ เวลาที่ใช้ไปแล้ว: {elapsed}\n"
             f"⏳ กำลังทำงาน... {percent}%\n{bar}\n```{snippet}```",
+            interaction,
         )
 
 
-async def _safe_edit(message, content):
+async def _edit_via_bot_token(message, content):
+    # Edit using the bot's own token (permanent) instead of the interaction's
+    # webhook token (valid for 15 minutes only). Works because the interaction
+    # response is a normal message authored by the bot.
+    try:
+        partial = client.get_partial_messageable(message.channel.id).get_partial_message(message.id)
+        await partial.edit(content=content)
+    except discord.HTTPException:
+        pass
+
+
+async def _safe_edit(message, content, interaction=None):
+    # InteractionMessage.edit() goes through the interaction webhook token,
+    # which Discord invalidates after 15 minutes. A long run (many channels
+    # across 5 platforms) would otherwise stop updating - and its final
+    # summary would never appear - once that token expired.
+    if interaction is not None and interaction.is_expired():
+        await _edit_via_bot_token(message, content)
+        return
     try:
         await message.edit(content=content)
     except discord.HTTPException:
-        pass
+        await _edit_via_bot_token(message, content)
 
 
 @tree.command(name="panel", description="แสดงปุ่มควบคุมสำหรับ Au Result Date")
