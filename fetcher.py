@@ -524,9 +524,55 @@ def swap_dates_if_needed(start_date, end_date):
     return start_date, end_date, False
 
 
+_MONTHS_BY_NAME = {}
+for _num, _names in enumerate([
+    ("january", "jan", "มกราคม", "ม.ค.", "มค"),
+    ("february", "feb", "กุมภาพันธ์", "ก.พ.", "กพ"),
+    ("march", "mar", "มีนาคม", "มี.ค.", "มีค"),
+    ("april", "apr", "เมษายน", "เม.ย.", "เมย"),
+    ("may", "พฤษภาคม", "พ.ค.", "พค"),
+    ("june", "jun", "มิถุนายน", "มิ.ย.", "มิย"),
+    ("july", "jul", "กรกฎาคม", "ก.ค.", "กค"),
+    ("august", "aug", "สิงหาคม", "ส.ค.", "สค"),
+    ("september", "sep", "sept", "กันยายน", "ก.ย.", "กย"),
+    ("october", "oct", "ตุลาคม", "ต.ค.", "ตค"),
+    ("november", "nov", "พฤศจิกายน", "พ.ย.", "พย"),
+    ("december", "dec", "ธันวาคม", "ธ.ค.", "ธค"),
+], start=1):
+    for _name in _names:
+        _MONTHS_BY_NAME[_name] = _num
+
+_TEXT_DATE_RE = re.compile(r'^(\d{1,2})\s+(\S+)\s+(\d{4})$')
+
+
+def _parse_text_date(date_str):
+    """Parse "15 May 2026", "15 Oct 2026", "15 ตุลาคม 2026", "15 ต.ค. 2569".
+
+    Month names may be English (full or abbreviated) or Thai (full or
+    abbreviated). A year above 2400 is treated as a Buddhist-era year (พ.ศ.)
+    and converted. Returns "dd/mm/yy" or None. (strptime's %B only accepted
+    full English names, so "Oct" or any Thai month silently failed.)
+    """
+    match = _TEXT_DATE_RE.match(date_str.strip())
+    if not match:
+        return None
+    day, month_name, year = int(match.group(1)), match.group(2), int(match.group(3))
+    month = _MONTHS_BY_NAME.get(month_name.lower().rstrip(".")) or _MONTHS_BY_NAME.get(month_name.lower())
+    if not month:
+        return None
+    if year > 2400:
+        year -= 543
+    try:
+        return datetime(year, month, day).strftime("%d/%m/%y")
+    except ValueError:
+        return None
+
+
 def parse_date_flexible(date_str, fallback_month=""):
     """Parse date from various formats.
-    Supports: DD/M/YYYY, DD/MM/YYYY, YYYY-MM-DD, "15 May 2026", "15" + "May 2026"
+    Supports: DD/M/YYYY, DD/MM/YYYY, YYYY-MM-DD, "15 May 2026", "15 Oct 2026",
+    Thai month names (full or abbreviated, พ.ศ. or ค.ศ. year), and
+    "15" + "May 2026".
     """
     if not date_str or not date_str.strip():
         return None
@@ -554,22 +600,18 @@ def parse_date_flexible(date_str, fallback_month=""):
     except ValueError:
         pass
 
-    # Try "15 May 2026" format
-    try:
-        dt = datetime.strptime(date_str, "%d %B %Y")
-        return dt.strftime("%d/%m/%y")
-    except ValueError:
-        pass
+    # Try "15 May 2026" / "15 Oct 2026" / "15 ตุลาคม 2569" / "15 ต.ค. 2569"
+    text_date = _parse_text_date(date_str)
+    if text_date:
+        return text_date
 
     # Try "15" + fallback_month "May 2026"
     if fallback_month and fallback_month.strip():
         try:
             day = int(date_str)
-            combined = f"{day} {fallback_month.strip()}"
-            dt = datetime.strptime(combined, "%d %B %Y")
-            return dt.strftime("%d/%m/%y")
-        except (ValueError, AttributeError):
-            pass
+        except ValueError:
+            return None
+        return _parse_text_date(f"{day} {fallback_month.strip()}")
 
     return None
 
@@ -2012,11 +2054,69 @@ def make_error_row(ch, reason=""):
 # WRITE RESULTS TO SHEET
 # ============================================================================
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_LOOKS_NUMERIC_OR_DATE_RE = re.compile(r'^\s*[\d.,/:\-\s]+\s*$')
+
+
+def sheet_text(value):
+    """Make a free-text value safe to write with valueInputOption=USER_ENTERED.
+
+    USER_ENTERED makes Sheets parse every cell like typed input, so a caption
+    or channel name from a social platform that starts with = + - @ becomes a
+    live formula (e.g. =HYPERLINK / =IMPORTXML), and text like "1/2" becomes a
+    date. A leading apostrophe forces the cell to plain text (Sheets hides it).
+    Non-strings and empty strings are returned unchanged.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith(_FORMULA_PREFIXES) or _LOOKS_NUMERIC_OR_DATE_RE.match(value):
+        return "'" + value
+    return value
+
+
+def _to_int(value):
+    """Parse a count that may be "", None, "None", "1,234" or an int. Blank -> 0."""
+    if value is None:
+        return 0
+    text = str(value).replace(",", "").strip()
+    if not text or text == "None":
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return int(float(text))
+
+
+def compute_er_pct(row):
+    """ER% = (likes + comments + shares + saves) / views * 100, as "12.34".
+
+    A platform that doesn't expose a field (Kick has no comments, Facebook may
+    omit one) leaves it blank - that counts as 0 instead of making the whole
+    ER% blank. Returns "" when views is missing/zero or unparsable.
+    """
+    try:
+        views = _to_int(row.get("views"))
+        if views <= 0:
+            return ""
+        engagement = sum(_to_int(row.get(k)) for k in ("likes", "comments", "shares", "saves"))
+        return f"{engagement / views * 100:.2f}"
+    except (ValueError, TypeError):
+        return ""
+
+
 def write_results_to_sheet(sheets_service, result_tab_name, results, progress_callback=None):
     """Write matched results to the 'Result' tab starting from row 4.
     A=Channel Name, B=Subscribe, C=Social Media, D=Link, E=Content Type,
     F=Date, G=Views, H=Like, I=Comment, J=Share, K=Save, L=Duration(min), M=ER%, N=Caption
     """
+    if not results:
+        # Deliberately do NOT clear the sheet here. A run that matched nothing
+        # (wrong date range, keyword typo, every channel failing) used to wipe
+        # the previous report and then report success.
+        if progress_callback:
+            progress_callback("  No results to write - leaving the existing data in the Result tab untouched")
+        return
+
     # Clear existing data from row 4 onwards (columns A-N)
     clear_range = f"'{result_tab_name}'!A4:N"
     sheets_service.spreadsheets().values().clear(
@@ -2024,58 +2124,31 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
         range=clear_range
     ).execute()
 
-    if not results:
-        if progress_callback:
-            progress_callback("  No results to write")
-        return
-
     values = []
     for r in results:
         # Column J = Share, Column K = Save
         share_val = r.get("shares", "")
         save_val = r.get("saves", "")
-        share_count = 0
-        try:
-            share_count = int(str(share_val).replace(",", "")) if share_val and share_val not in ("None", "") else 0
-        except (ValueError, TypeError):
-            pass
-        save_count = 0
-        try:
-            save_count = int(str(save_val).replace(",", "")) if save_val and save_val not in ("None", "") else 0
-        except (ValueError, TypeError):
-            pass
-
-        # Calculate ER% (Engagement Rate)
-        # ER = (Likes + Comments + Shares + Saves) / Views * 100
-        er_pct = ""
-        try:
-            views_num = int(str(r.get("views", "0")).replace(",", ""))
-            likes_num = int(str(r.get("likes", "0")).replace(",", ""))
-            comments_num = int(str(r.get("comments", "0")).replace(",", ""))
-            if views_num > 0:
-                er_val = (likes_num + comments_num + share_count + save_count) / views_num * 100
-                er_pct = f"{er_val:.2f}"
-        except (ValueError, TypeError):
-            pass
 
         # Store er_pct back into result dict for web UI display
+        er_pct = compute_er_pct(r)
         r["er_pct"] = er_pct
 
         values.append([
-            r["channel_name"],          # A
-            r["subscribers"],            # B
-            r["platform"],               # C
-            r["link"],                   # D
-            r["content_type"],           # E
-            r["published_date"],         # F
-            r["views"],                  # G
-            r["likes"],                  # H
-            r["comments"],               # I
-            share_val,                   # J = Share
-            save_val,                    # K = Save
-            r["duration"],               # L = Duration (minute)
-            er_pct,                      # M = ER%
-            r["caption"],                # N
+            sheet_text(r["channel_name"]),   # A
+            r["subscribers"],                # B
+            sheet_text(r["platform"]),       # C
+            sheet_text(r["link"]),           # D
+            sheet_text(r["content_type"]),   # E
+            r["published_date"],             # F
+            r["views"],                      # G
+            r["likes"],                      # H
+            r["comments"],                   # I
+            share_val,                       # J = Share
+            save_val,                        # K = Save
+            r["duration"],                   # L = Duration (minute)
+            er_pct,                          # M = ER%
+            sheet_text(r["caption"]),        # N
         ])
 
     range_str = f"'{result_tab_name}'!A4"
@@ -2500,6 +2573,12 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
             if names:
                 log(f"    {platform}: {', '.join(names)}")
 
+    warning = None
+    if not all_results:
+        warning = ("ไม่พบรายการที่ตรงกับช่วงวันที่/keyword - ไม่ได้ล้างหรือแก้ข้อมูลเดิมใน Result tab "
+                   "(เช็กวันที่ใน A2/C2 และ keyword ใน E2)")
+        log(f"\n  WARNING: {warning}")
+
     log(f"\nDone! Check the Result tab in your Google Sheet.")
 
     return {
@@ -2507,6 +2586,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
         "total_rows": len(all_results),
         "results": all_results,
         "error": None,
+        "warning": warning,
         "yt_units_used": yt_usage["yt_units"],
         "sc_credits_remaining": sc_credits_remaining,
         "failed_channels": failed_channels,

