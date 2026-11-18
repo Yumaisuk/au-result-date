@@ -417,3 +417,91 @@ def test_resolve_tiktok_short_url_passthrough_for_normal_url():
 def test_resolve_tiktok_short_url_passthrough_for_non_tiktok_url():
     url = "https://www.youtube.com/watch?v=abc123"
     assert resolve_tiktok_short_url(url) == url
+
+
+# ---- YouTube channel ID / URL handling ----
+
+def test_extract_channel_id_youtube_handle_url_with_trailing_path_and_query():
+    assert extract_channel_id("https://www.youtube.com/@KamiReiV/videos?si=abc", "youtube") == "KamiReiV"
+
+
+def test_extract_channel_id_youtube_handle_url_without_scheme():
+    assert extract_channel_id("youtube.com/@KamiReiV", "youtube") == "KamiReiV"
+
+
+def test_extract_channel_id_youtube_percent_encoded_thai_handle():
+    assert extract_channel_id("https://www.youtube.com/@%E0%B9%84%E0%B8%97%E0%B8%A2", "youtube") == "ไทย"
+
+
+def test_extract_channel_id_youtube_channel_url_with_trailing_path():
+    assert extract_channel_id(
+        "https://www.youtube.com/channel/UCVzwh-Nav8BxYbm-Vt6xQYg/videos", "youtube"
+    ) == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+
+
+def test_extract_channel_id_youtube_user_and_c_urls():
+    assert extract_channel_id("https://www.youtube.com/user/SomeLegacyName", "youtube") == "SomeLegacyName"
+    assert extract_channel_id("https://www.youtube.com/c/SomeCustom", "youtube") == "SomeCustom"
+
+
+def test_extract_channel_id_youtube_plain_channel_id_passthrough():
+    assert extract_channel_id("UCVzwh-Nav8BxYbm-Vt6xQYg", "youtube") == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+
+
+def _fake_youtube_api(monkeypatch, responses):
+    """Patch urlopen_with_retry; `responses` maps a URL substring to a JSON-able
+    reply (or an Exception to raise). Returns the list of URLs requested."""
+    import json
+    import fetcher
+    calls = []
+
+    def fake(req, timeout=15, retries=2, backoff=1.5):
+        url = req.full_url if hasattr(req, "full_url") else req
+        calls.append(url)
+        for needle, reply in responses.items():
+            if needle in url:
+                if isinstance(reply, Exception):
+                    raise reply
+                return json.dumps(reply).encode("utf-8")
+        return json.dumps({"items": []}).encode("utf-8")
+
+    monkeypatch.setattr(fetcher, "urlopen_with_retry", fake)
+    return calls
+
+
+def test_resolve_youtube_channel_id_uc_id_needs_no_api_call(monkeypatch):
+    from fetcher import resolve_youtube_channel_id
+    calls = _fake_youtube_api(monkeypatch, {})
+    assert resolve_youtube_channel_id("UCVzwh-Nav8BxYbm-Vt6xQYg", "KEY") == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+    assert calls == []
+
+
+def test_resolve_youtube_channel_id_full_channel_url_needs_no_api_call(monkeypatch):
+    from fetcher import resolve_youtube_channel_id
+    calls = _fake_youtube_api(monkeypatch, {})
+    url = "https://www.youtube.com/channel/UCVzwh-Nav8BxYbm-Vt6xQYg"
+    assert resolve_youtube_channel_id(url, "KEY") == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+    assert calls == []
+
+
+def test_resolve_youtube_channel_id_handle_uses_exact_for_handle_lookup(monkeypatch):
+    from fetcher import resolve_youtube_channel_id
+    calls = _fake_youtube_api(monkeypatch, {"forHandle=%40KamiReiV": {"items": [{"id": "UCVzwh-Nav8BxYbm-Vt6xQYg"}]}})
+    usage = {}
+    assert resolve_youtube_channel_id("KamiReiV", "KEY", usage=usage) == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+    assert len(calls) == 1 and "/search" not in calls[0]
+    assert usage["yt_units"] == 1
+
+
+def test_resolve_youtube_channel_id_full_handle_url_and_at_prefix(monkeypatch):
+    from fetcher import resolve_youtube_channel_id
+    _fake_youtube_api(monkeypatch, {"forHandle=%40KamiReiV": {"items": [{"id": "UCVzwh-Nav8BxYbm-Vt6xQYg"}]}})
+    assert resolve_youtube_channel_id("https://www.youtube.com/@KamiReiV", "KEY") == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+    assert resolve_youtube_channel_id("@KamiReiV", "KEY") == "UCVzwh-Nav8BxYbm-Vt6xQYg"
+
+
+def test_resolve_youtube_channel_id_falls_back_to_search_when_no_exact_match(monkeypatch):
+    from fetcher import resolve_youtube_channel_id
+    calls = _fake_youtube_api(monkeypatch, {"/search": {"items": [{"snippet": {"channelId": "UCfromsearch000000000000"}}]}})
+    assert resolve_youtube_channel_id("SomeCustom", "KEY") == "UCfromsearch000000000000"
+    assert any("/search" in c for c in calls)
