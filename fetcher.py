@@ -170,8 +170,10 @@ def extract_channel_id(raw_id, platform):
     if not raw_id:
         return raw_id
 
-    # If not a URL, return as-is (already a plain handle/ID)
-    if not raw_id.startswith("http"):
+    # If not a URL, return as-is (already a plain handle/ID). A YouTube link
+    # pasted without "https://" (e.g. "youtube.com/@name") still counts as a URL.
+    is_youtube_url = platform.lower() == "youtube" and "youtube.com/" in raw_id.lower()
+    if not raw_id.startswith("http") and not is_youtube_url:
         # Remove leading @ for TikTok/Instagram
         if raw_id.startswith("@") and platform in ("tiktok", "instagram"):
             return raw_id[1:]
@@ -190,21 +192,27 @@ def extract_channel_id(raw_id, platform):
             return match.group(1)
 
     elif platform_lower == "youtube":
+        # Percent-decode first so non-ASCII handles (e.g. Thai, which browsers
+        # copy as %E0%B8...) survive instead of being cut at the first escape.
+        decoded = urllib.parse.unquote(raw_id)
         # https://www.youtube.com/channel/UCxxxx
-        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)', raw_id)
+        match = re.search(r'youtube\.com/channel/([^/?#&\s]+)', decoded)
         if match:
             return match.group(1)
-        # https://www.youtube.com/@handle
-        match = re.search(r'youtube\.com/@([a-zA-Z0-9_.-]+)', raw_id)
+        # https://www.youtube.com/@handle (also /@handle/videos, /@handle?si=...)
+        match = re.search(r'youtube\.com/@([^/?#&\s]+)', decoded)
         if match:
             return match.group(1)
-        # https://www.youtube.com/c/CustomName
-        match = re.search(r'youtube\.com/c/([a-zA-Z0-9_.-]+)', raw_id)
+        # https://www.youtube.com/c/CustomName or /user/LegacyName
+        match = re.search(r'youtube\.com/(?:c|user)/([^/?#&\s]+)', decoded)
         if match:
             return match.group(1)
-        # https://www.youtube.com/CustomName (old format)
-        match = re.search(r'youtube\.com/([a-zA-Z0-9_.-]+)', raw_id)
-        if match:
+        # https://www.youtube.com/CustomName (old format) - but not a video/
+        # playlist/etc. path, which isn't a channel name.
+        match = re.search(r'youtube\.com/([^/?#&\s@]+)', decoded)
+        if match and match.group(1).lower() not in (
+            "watch", "shorts", "playlist", "embed", "results", "feed", "live", "channel"
+        ):
             return match.group(1)
 
     elif platform_lower == "facebook":
@@ -720,31 +728,41 @@ def resolve_youtube_channel_id(channel_id, api_key, progress_callback=None, usag
     """
     channel_id = channel_id.strip()
 
-    # Already a channel ID (starts with UC)
-    if channel_id.startswith("UC") and len(channel_id) == 24:
-        return channel_id
-
     # Full URL (defensive - by the time run_fetcher calls this, the value
     # has normally already been through extract_channel_id(), which strips
     # the URL down to a bare handle/slug/ID)
-    if "youtube.com" in channel_id:
-        # Extract @handle from URL
-        handle_match = re.search(r'youtube\.com/@([a-zA-Z0-9_.-]+)', channel_id)
-        if handle_match:
-            channel_id = "@" + handle_match.group(1)
-        else:
-            # Extract /channel/UC... from URL
-            ch_match = re.search(r'youtube\.com/channel/(UC[a-zA-Z0-9_-]+)', channel_id)
-            if ch_match:
-                return ch_match.group(1)
+    if "youtube.com/" in channel_id.lower():
+        channel_id = extract_channel_id(channel_id, "youtube")
 
-    # Anything that isn't a UC... ID at this point needs resolving via the
-    # search API - this includes @handles, but also custom names/slugs from
-    # youtube.com/c/... and legacy youtube.com/CustomName URLs, both of
-    # which extract_channel_id() returns *without* a leading "@" (unlike a
-    # handle). Gating this on a leading "@" (as before) silently skipped
-    # resolution for a URL-derived handle/slug and sent the raw text straight
-    # to channels.list as if it were already a real ID - which always 404s.
+    # Already a channel ID (UC + 22 chars) - no API call needed
+    if re.fullmatch(r'UC[A-Za-z0-9_-]{22}', channel_id):
+        return channel_id
+
+    # Anything else is a handle (@name or bare name) or a legacy /c/ or /user/
+    # name. Look it up exactly first - channels.list costs 1 unit and returns
+    # that exact channel - and only fall back to the fuzzy search below (100
+    # units, top text match, may be the wrong channel) if nothing matched.
+    name = channel_id.lstrip("@")
+    for param, value in (("forHandle", "@" + name), ("forUsername", name)):
+        lookup_url = (
+            f"https://www.googleapis.com/youtube/v3/channels"
+            f"?part=id&{param}={urllib.parse.quote(value, safe='')}&key={api_key}"
+        )
+        try:
+            data = json.loads(urlopen_with_retry(urllib.request.Request(lookup_url), timeout=15).decode("utf-8"))
+            if usage is not None:
+                usage["yt_units"] = usage.get("yt_units", 0) + 1  # channels.list costs 1 unit
+            items = data.get("items", [])
+            if items and items[0].get("id"):
+                if progress_callback:
+                    progress_callback(f"    Resolved {value} -> {items[0]['id']} ({param})")
+                return items[0]["id"]
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"    {param} lookup failed for {value}: {e}")
+
+    if progress_callback:
+        progress_callback(f"    No exact match for {channel_id}, falling back to search")
     url = (
         f"https://www.googleapis.com/youtube/v3/search"
         f"?part=snippet&type=channel&q={urllib.parse.quote(channel_id, safe='')}"
