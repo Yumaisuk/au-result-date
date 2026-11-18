@@ -1575,6 +1575,37 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
 # INSTAGRAM - ScrapeCreators API
 # ============================================================================
 
+def _instagram_profile_fields(data, fallback_name):
+    """(display name, follower count as str) from a ScrapeCreators Instagram
+    profile response.
+
+    The real response nests the user under data.user and puts the follower
+    count at edge_followed_by.count. The old code looked for a top-level
+    "user" and a "follower_count" field, found neither, and so every Instagram
+    row showed 0 subscribers and the bare username as the channel name. The
+    older flat shapes are still accepted as fallbacks.
+    """
+    root = data.get("data") if isinstance(data.get("data"), dict) else data
+    user = root.get("user") if isinstance(root.get("user"), dict) else root
+    followers = ((user.get("edge_followed_by") or {}).get("count")
+                 or user.get("follower_count") or user.get("followers"))
+    name = user.get("full_name") or user.get("username") or fallback_name
+    return name, (str(followers) if followers else "0")
+
+
+def _instagram_like_count(media):
+    """Likes as a string, or "Hidden" when the author hides like counts.
+
+    With hidden likes Instagram does not expose the real total, so whatever
+    like_count comes back is not a trustworthy number - showing it (e.g. "3")
+    made a post look like it had 3 likes. "Hidden" also makes ER% blank for
+    that row instead of silently understating it.
+    """
+    if media.get("like_and_view_counts_disabled"):
+        return "Hidden"
+    return str(media.get("like_count", "0"))
+
+
 def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=None, keywords=None, progress_callback=None):
     """Fetch posts/reels from an Instagram user via ScrapeCreators API, filter by date and keywords.
 
@@ -1599,9 +1630,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
     req = urllib.request.Request(profile_url, headers=sc_headers, method="GET")
     try:
         data = json.loads(urlopen_with_retry(req, timeout=15).decode("utf-8"))
-        user_data = data.get("user", data)
-        subscriber_count = str(user_data.get("follower_count", user_data.get("followers", "0")))
-        channel_name = user_data.get("full_name", user_data.get("username", username))
+        channel_name, subscriber_count = _instagram_profile_fields(data, username)
         if progress_callback:
             progress_callback(f"    IG user: @{username} ({channel_name}), followers: {subscriber_count}")
     except Exception as e:
@@ -1696,7 +1725,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
             else:
                 link = f"https://www.instagram.com/p/{code}/" if code else ""
 
-            like_count = str(item.get("like_count", "0"))
+            like_count = _instagram_like_count(item)
             comment_count = str(item.get("comment_count", "0"))
 
             play_count = item.get("play_count")
@@ -1815,7 +1844,7 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
             link = f"https://www.instagram.com/reel/{code}/" if code else ""
 
-            like_count = str(media.get("like_count", "0"))
+            like_count = _instagram_like_count(media)
             comment_count = str(media.get("comment_count", "0"))
 
             play_count = media.get("play_count")
@@ -1863,6 +1892,9 @@ def fetch_instagram_channel_posts(username, api_key, start_date=None, end_date=N
 
     if progress_callback:
         progress_callback(f"    Matched {len(matched_posts)} items from @{username}")
+        hidden_likes = sum(1 for p in matched_posts if p["likes"] == "Hidden")
+        if hidden_likes:
+            progress_callback(f"    {hidden_likes} item(s) hide their like count - Likes shown as 'Hidden'")
 
     channel_meta = {"channel_name": channel_name, "subscribers": subscriber_count, "had_error": had_error}
     return matched_posts, channel_meta

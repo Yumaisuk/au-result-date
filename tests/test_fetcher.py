@@ -731,3 +731,64 @@ def test_write_results_match_source_defaults_to_blank():
     svc = _FakeSheets()
     write_results_to_sheet(svc, "Result", [_row()])
     assert svc.vals.written[0][14] == ""
+
+
+# ---- Instagram: profile parsing and hidden like counts ----
+
+def test_instagram_profile_fields_reads_nested_data_user_and_edge_followed_by():
+    from fetcher import _instagram_profile_fields
+    data = {"success": True, "data": {"user": {
+        "full_name": "K Ning", "username": "k4niing.3", "edge_followed_by": {"count": 1234}}}}
+    assert _instagram_profile_fields(data, "fallback") == ("K Ning", "1234")
+
+
+def test_instagram_profile_fields_accepts_older_flat_shapes():
+    from fetcher import _instagram_profile_fields
+    assert _instagram_profile_fields({"user": {"full_name": "A", "follower_count": 7}}, "x") == ("A", "7")
+    assert _instagram_profile_fields({"username": "bob", "followers": 9}, "x") == ("bob", "9")
+
+
+def test_instagram_profile_fields_falls_back_when_nothing_usable():
+    from fetcher import _instagram_profile_fields
+    assert _instagram_profile_fields({}, "somename") == ("somename", "0")
+
+
+def test_instagram_like_count_hidden_flag_gives_hidden():
+    from fetcher import _instagram_like_count
+    assert _instagram_like_count({"like_count": 3, "like_and_view_counts_disabled": True}) == "Hidden"
+    assert _instagram_like_count({"like_count": 62, "like_and_view_counts_disabled": False}) == "62"
+    assert _instagram_like_count({"like_count": 62}) == "62"
+    assert _instagram_like_count({}) == "0"
+
+
+def test_compute_er_pct_is_blank_when_likes_are_hidden():
+    from fetcher import compute_er_pct
+    assert compute_er_pct({"views": "100", "likes": "Hidden", "comments": "6"}) == ""
+
+
+def test_instagram_fetch_uses_profile_name_followers_and_marks_hidden_likes(monkeypatch):
+    import datetime as _dt
+    import fetcher
+    from fetcher import fetch_instagram_channel_posts
+    monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
+    ts = int(_dt.datetime(2026, 11, 10, 5, 0, tzinfo=_dt.timezone.utc).timestamp())
+
+    def post(code, likes, hidden):
+        return {"code": code, "caption": {"text": "hello"}, "taken_at": ts, "media_type": 1,
+                "product_type": "feed", "like_count": likes, "comment_count": 6,
+                "like_and_view_counts_disabled": hidden}
+
+    _fake_youtube_api(monkeypatch, {
+        "/v1/instagram/profile": {"data": {"user": {"full_name": "K Ning", "edge_followed_by": {"count": 1234}}}},
+        "/v2/instagram/user/posts": {"items": [post("HID", 3, True), post("VIS", 156, False)], "more_available": False},
+        "/v1/instagram/user/reels": {"items": []},
+    })
+    logs = []
+    posts, meta = fetch_instagram_channel_posts(
+        "k4niing.3", "KEY", start_date="29/10/26", end_date="18/11/26", progress_callback=logs.append)
+    by_code = {p["link"].rstrip("/").split("/")[-1]: p for p in posts}
+    assert by_code["HID"]["likes"] == "Hidden" and by_code["HID"]["comments"] == "6"
+    assert by_code["VIS"]["likes"] == "156"
+    assert all(p["channel_name"] == "K Ning" and p["subscribers"] == "1234" for p in posts)
+    assert meta["subscribers"] == "1234"
+    assert any("1 item(s) hide their like count" in line for line in logs)
