@@ -739,12 +739,12 @@ def test_instagram_profile_fields_reads_nested_data_user_and_edge_followed_by():
     from fetcher import _instagram_profile_fields
     data = {"success": True, "data": {"user": {
         "full_name": "K Ning", "username": "k4niing.3", "edge_followed_by": {"count": 1234}}}}
-    assert _instagram_profile_fields(data, "fallback") == ("K Ning", "1234")
+    assert _instagram_profile_fields(data, "fallback") == ("k4niing.3", "1234")
 
 
 def test_instagram_profile_fields_accepts_older_flat_shapes():
     from fetcher import _instagram_profile_fields
-    assert _instagram_profile_fields({"user": {"full_name": "A", "follower_count": 7}}, "x") == ("A", "7")
+    assert _instagram_profile_fields({"user": {"full_name": "A", "username": "a_user", "follower_count": 7}}, "x") == ("a_user", "7")
     assert _instagram_profile_fields({"username": "bob", "followers": 9}, "x") == ("bob", "9")
 
 
@@ -779,7 +779,7 @@ def test_instagram_fetch_uses_profile_name_followers_and_marks_hidden_likes(monk
                 "like_and_view_counts_disabled": hidden}
 
     _fake_youtube_api(monkeypatch, {
-        "/v1/instagram/profile": {"data": {"user": {"full_name": "K Ning", "edge_followed_by": {"count": 1234}}}},
+        "/v1/instagram/profile": {"data": {"user": {"full_name": "K Ning", "username": "k4niing.3", "edge_followed_by": {"count": 1234}}}},
         "/v2/instagram/user/posts": {"items": [post("HID", 3, True), post("VIS", 156, False)], "more_available": False},
         "/v1/instagram/user/reels": {"items": []},
     })
@@ -789,6 +789,16 @@ def test_instagram_fetch_uses_profile_name_followers_and_marks_hidden_likes(monk
     by_code = {p["link"].rstrip("/").split("/")[-1]: p for p in posts}
     assert by_code["HID"]["likes"] == "Hidden" and by_code["HID"]["comments"] == "6"
     assert by_code["VIS"]["likes"] == "156"
-    assert all(p["channel_name"] == "K Ning" and p["subscribers"] == "1234" for p in posts)
+    assert all(p["channel_name"] == "k4niing.3" and p["subscribers"] == "1234" for p in posts)
     assert meta["subscribers"] == "1234"
     assert any("1 item(s) hide their like count" in line for line in logs)
+
+
+def test_instagram_profile_fields_uses_username_not_display_name():
+    from fetcher import _instagram_profile_fields
+    data = {"data": {"user": {"full_name": "Chanon Udomwetayanan", "username": "lxlamountylxl",
+                              "edge_followed_by": {"count": 5}}}}
+    assert _instagram_profile_fields(data, "typed_in_sheet")[0] == "lxlamountylxl"
+    # no username in the response -> the handle taken from the sheet, never the display name
+    data_no_username = {"data": {"user": {"full_name": "Chanon Udomwetayanan"}}}
+    assert _instagram_profile_fields(data_no_username, "typed_in_sheet")[0] == "typed_in_sheet"

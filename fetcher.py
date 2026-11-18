@@ -1576,20 +1576,25 @@ def fetch_facebook_channel_posts(page_id_or_slug, api_key, start_date=None, end_
 # ============================================================================
 
 def _instagram_profile_fields(data, fallback_name):
-    """(display name, follower count as str) from a ScrapeCreators Instagram
+    """(channel name, follower count as str) from a ScrapeCreators Instagram
     profile response.
+
+    The channel name is the account's @username, not its display name: it is
+    what the Channel KOLs sheet is keyed on, it is unique and stable (display
+    names are free text and can change or repeat), and the report reads the
+    same as the input list.
 
     The real response nests the user under data.user and puts the follower
     count at edge_followed_by.count. The old code looked for a top-level
     "user" and a "follower_count" field, found neither, and so every Instagram
-    row showed 0 subscribers and the bare username as the channel name. The
-    older flat shapes are still accepted as fallbacks.
+    row showed 0 subscribers. The older flat shapes are still accepted as
+    fallbacks.
     """
     root = data.get("data") if isinstance(data.get("data"), dict) else data
     user = root.get("user") if isinstance(root.get("user"), dict) else root
     followers = ((user.get("edge_followed_by") or {}).get("count")
                  or user.get("follower_count") or user.get("followers"))
-    name = user.get("full_name") or user.get("username") or fallback_name
+    name = user.get("username") or fallback_name
     return name, (str(followers) if followers else "0")
 
 
