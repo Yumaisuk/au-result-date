@@ -51,6 +51,7 @@
                                 <th>Duration</th>
                                 <th>ER%</th>
                                 <th>Caption</th>
+                                <th>Matched by</th>
                             </tr>
                         </thead>
                         <tbody id="resultsBody"></tbody>
@@ -294,6 +295,7 @@
                     <td class="num">${escapeHtml(r.duration || '')}</td>
                     <td class="num">${escapeHtml(r.er_pct || '')}</td>
                     <td class="caption" title="${escapeHtml(r.caption || '')}">${escapeHtml(captionShort)}</td>
+                    <td>${escapeHtml(r.match_source || '')}</td>
                 `;
                 tbody.appendChild(tr);
             });

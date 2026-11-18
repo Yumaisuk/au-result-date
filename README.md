@@ -18,6 +18,18 @@ Runs can be triggered from a Discord bot panel or from the web UI.
   broken link, missing API key, repeated API failure) still gets a row at
   its own position: the name from the sheet, `Error` in the Link column, and
   the original link plus the reason in the Caption column.
+- **Keyword matching and the "Matched by" column.** A post matches when a
+  keyword appears in its caption (YouTube: its title). For YouTube, a
+  `#hashtag` in the description also counts - many creators put the game name
+  only there - but the rest of the description is not searched, because it is
+  mostly boilerplate. Column **O ("Matched by")** of the Result tab says why
+  each row is there: `Title` (YouTube) / `Caption` (other platforms) when the
+  keyword is in the text, `Hashtag` when it is only inside a #hashtag,
+  `Direct link` for a single video/post link (no filters applied), and blank
+  when no keywords are configured or the row is an `Error` row. Filter the
+  column for `Hashtag` to double-check the matches most likely to be false
+  positives. Add a header such as "Matched by" to cell O3 yourself; the
+  program writes from row 4 and clears/writes columns A-O.
 - A row in "Channel KOLs" can also be a direct link to one specific video/
   post (e.g. a `youtube.com/watch?v=...`, `youtube.com/shorts/...`, or
   `tiktok.com/@user/video/...` URL) instead of a channel/profile link -
