@@ -133,6 +133,17 @@
         }
 
         function finishRun(result) {
+            // The server sends a "complete" event even when the run itself
+            // failed (auth error, no dates configured, ...) - show that as an
+            // error instead of a green "done" banner.
+            if (result && result.success === false) {
+                const msg = result.error || 'Unknown error';
+                appendLog('');
+                appendLog('❌ Error: ' + msg);
+                finishRunError(msg);
+                return;
+            }
+
             const btn = document.getElementById('runBtn');
             const statusText = document.getElementById('statusText');
 
@@ -145,7 +156,11 @@
             const banner = document.getElementById('notificationBanner');
             const totalRows = result.total_rows || 0;
             banner.className = 'notification-banner success';
-            banner.innerHTML = `✅ <strong>ดึงข้อมูลเสร็จแล้ว!</strong> — ${totalRows} รายการถูกเขียนลง Google Sheet <button onclick="this.parentElement.style.display='none'" class="notif-close">×</button>`;
+            if (result.warning) {
+                banner.innerHTML = `⚠️ <strong>เสร็จแล้ว แต่ไม่พบรายการ</strong> — ${escapeHtml(result.warning)} <button onclick="this.parentElement.style.display='none'" class="notif-close">×</button>`;
+            } else {
+                banner.innerHTML = `✅ <strong>ดึงข้อมูลเสร็จแล้ว!</strong> — ${totalRows} รายการถูกเขียนลง Google Sheet <button onclick="this.parentElement.style.display='none'" class="notif-close">×</button>`;
+            }
             banner.style.display = 'block';
 
             sendBrowserNotification('✅ Au Result Date - เสร็จแล้ว!', `ดึงข้อมูลเสร็จสมบูรณ์ ${totalRows} รายการ`);
