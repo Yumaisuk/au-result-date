@@ -631,7 +631,7 @@ def test_write_results_empty_does_not_clear_existing_data():
 def test_write_results_clears_then_writes_when_there_are_results():
     svc = _FakeSheets()
     write_results_to_sheet(svc, "Result", [_row()])
-    assert svc.vals.cleared == ["'Result'!A4:N"]
+    assert svc.vals.cleared == ["'Result'!A4:O"]
     assert len(svc.vals.written) == 1
 
 
@@ -644,3 +644,90 @@ def test_write_results_escapes_formula_caption_and_computes_er_with_blank_commen
     assert written[13] == "'=IMPORTXML(\"http://evil\",\"//a\")"
     assert written[12] == "5.00"
     assert rows[0]["er_pct"] == "5.00"
+
+
+# ---- YouTube keyword matching: title or #hashtag in description ----
+
+def test_extract_hashtags_returns_tags_without_hash():
+    from fetcher import extract_hashtags
+    assert extract_hashtags("Join us #NIKKE #นิกเกะ\n#Airi, thanks") == ["NIKKE", "นิกเกะ", "Airi,"]
+    assert extract_hashtags("") == []
+    assert extract_hashtags(None) == []
+
+
+def test_matches_keywords_in_hashtags_matches_whole_hashtag_only():
+    from fetcher import matches_keywords_in_hashtags
+    assert matches_keywords_in_hashtags("blah #NIKKE blah", ["NIKKE"])
+    assert matches_keywords_in_hashtags("blah #nikke", ["#NIKKE"])
+    assert matches_keywords_in_hashtags("#นิกเกะ", ["นิกเกะ"])
+    # plain word in the description is not a hashtag
+    assert not matches_keywords_in_hashtags("playing NIKKE today", ["NIKKE"])
+    # a longer hashtag that merely starts with the keyword is not a match
+    assert not matches_keywords_in_hashtags("#NIKKE4thAnniversary", ["NIKKE"])
+    # neighbouring hashtags do not combine into a match
+    assert not matches_keywords_in_hashtags("#ni #kke", ["NIKKE"])
+
+
+def _yt_item(vid, title, description, published="2026-11-13T10:00:00Z"):
+    return {"id": vid, "snippet": {"title": title, "description": description, "publishedAt": published},
+            "statistics": {"viewCount": "10", "likeCount": "1", "commentCount": "0"},
+            "contentDetails": {"duration": "PT10M"}}
+
+
+def test_youtube_channel_fetch_keeps_title_and_hashtag_matches_but_not_plain_description(monkeypatch):
+    from fetcher import fetch_youtube_channel_videos
+    _fake_youtube_api(monkeypatch, {
+        "/channels?": {"items": [{"snippet": {"title": "Airi"}, "statistics": {"subscriberCount": "100"},
+                                  "contentDetails": {"relatedPlaylists": {"uploads": "UUx"}}}]},
+        "/playlistItems": {"items": [
+            {"snippet": {"resourceId": {"videoId": v}, "publishedAt": "2026-11-13T10:00:00Z"}}
+            for v in ("title_hit", "hashtag_hit", "plain_desc_only", "no_hit")]},
+        "/videos?": {"items": [
+            _yt_item("title_hit", "NIKKE day one", "nothing"),
+            _yt_item("hashtag_hit", "เรียกพี่ว่า ราชา", "Join membership\n#NIKKE #Airi"),
+            _yt_item("plain_desc_only", "Other game", "sponsor of NIKKE and more"),
+            _yt_item("no_hit", "Other game", "#minecraft"),
+        ]},
+    })
+    logs = []
+    videos, meta = fetch_youtube_channel_videos(
+        "UCVzwh-Nav8BxYbm-Vt6xQYg", "KEY", start_date="29/10/26", end_date="18/11/26",
+        keywords=["NIKKE"], progress_callback=logs.append)
+    assert [v["link"].split("=")[-1] for v in videos] == ["title_hit", "hashtag_hit"]
+    assert any("1 matched only via a #hashtag" in line for line in logs)
+
+
+# ---- "Matched by" column (O) ----
+
+def test_keyword_match_source_no_keywords_is_blank():
+    from fetcher import keyword_match_source
+    assert keyword_match_source("anything #tag", []) == ""
+
+
+def test_keyword_match_source_caption_vs_hashtag():
+    from fetcher import keyword_match_source
+    assert keyword_match_source("Playing NIKKE tonight", ["NIKKE"]) == "Caption"
+    assert keyword_match_source("Playing NIKKE tonight", ["NIKKE"], "Title") == "Title"
+    assert keyword_match_source("Fun stream #NIKKE #game", ["NIKKE"]) == "Hashtag"
+    assert keyword_match_source("NIKKE review #NIKKE", ["NIKKE"]) == "Caption"
+    assert keyword_match_source("#nikke only", ["#NIKKE"]) == "Hashtag"
+
+
+def test_make_error_row_has_blank_match_source():
+    from fetcher import make_error_row
+    row = make_error_row({"channel_name": "X", "platform": "youtube", "channel_id": "x"}, "reason")
+    assert row["match_source"] == ""
+
+
+def test_write_results_writes_match_source_to_column_o():
+    svc = _FakeSheets()
+    write_results_to_sheet(svc, "Result", [_row(match_source="Hashtag")])
+    written = svc.vals.written[0]
+    assert len(written) == 15
+    assert written[14] == "Hashtag"
+
+
+def test_write_results_match_source_defaults_to_blank():
+    svc = _FakeSheets()
+    write_results_to_sheet(svc, "Result", [_row()])
+    assert svc.vals.written[0][14] == ""

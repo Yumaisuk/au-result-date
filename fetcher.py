@@ -938,6 +938,7 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
     # Step 3: Fetch video details in batches, filter by date & keywords
     matched_videos = []
+    hashtag_only_matches = 0  # videos kept only because of a description #hashtag
     batch_size = 50
     all_too_old = False  # stop fetching details if entire batch is before start_date
 
@@ -982,17 +983,20 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
             if end_dt and published_dt and published_dt > end_dt:
                 continue
 
-            # Keyword filter (case-insensitive, title only - not description).
-            # Matching the description too sounds more complete, but YouTube
-            # descriptions are mostly boilerplate reused across every upload
-            # (sponsor blocks, social links, a wall of hashtags) regardless
-            # of that video's actual topic - confirmed live: a "POE2" keyword
-            # pulled in unrelated streams whose description just happened to
-            # carry a leftover "#poe2" hashtag or an old item-filter link.
-            # The title is what the creator wrote specifically for this
-            # video, so it's the only reliable relevance signal here.
+            # Keyword filter (case-insensitive): the title, or a #hashtag in
+            # the description. The rest of the description is deliberately
+            # NOT searched: YouTube descriptions are mostly boilerplate reused
+            # across every upload (sponsor blocks, social links, old item-
+            # filter links) regardless of that video's actual topic - confirmed
+            # live: a "POE2" keyword pulled in unrelated streams that way.
+            # Hashtags are the exception because many creators put the game /
+            # campaign name only there and not in the title. The trade-off: a
+            # leftover hashtag copied into every description can still match,
+            # so hashtag-only matches are counted in the run log.
             if keywords and not matches_keywords(title, keywords):
-                continue
+                if not matches_keywords_in_hashtags(snippet.get("description", ""), keywords):
+                    continue
+                hashtag_only_matches += 1
 
             matched_videos.append(_youtube_video_item_to_dict(item, channel_title, subscriber_count))
 
@@ -1007,6 +1011,8 @@ def fetch_youtube_channel_videos(channel_id, api_key, start_date=None, end_date=
 
     if progress_callback:
         progress_callback(f"    Matched {len(matched_videos)} videos from {channel_title}")
+        if hashtag_only_matches:
+            progress_callback(f"    ({hashtag_only_matches} matched only via a #hashtag in the description, not the title)")
 
     channel_meta["had_error"] = had_error
     return matched_videos, channel_meta
@@ -1955,6 +1961,40 @@ def get_scrapecreators_credit_balance(api_key, progress_callback=None):
 _THAI_CHAR_RE = re.compile(r'[฀-๿]')
 
 
+_HASHTAG_RE = re.compile(r'#([^\s#]+)')
+
+
+def extract_hashtags(text):
+    """Return the hashtags in `text` without their leading '#'."""
+    return _HASHTAG_RE.findall(text or "")
+
+
+def matches_keywords_in_hashtags(text, keywords):
+    """True if any #hashtag in `text` matches one of the keywords.
+
+    Each hashtag is checked on its own (same whole-word rules as
+    matches_keywords), so words from neighbouring hashtags can't combine into
+    a false match. "#NIKKE" matches "NIKKE"; "#NIKKE4thAnniversary" does not.
+    """
+    if not keywords:
+        return True
+    return any(matches_keywords(tag, keywords) for tag in extract_hashtags(text))
+
+
+def keyword_match_source(text, keywords, text_label="Caption"):
+    """Say where a keyword match came from, for the report's "Matched by" column.
+
+    Returns "" when no keywords are configured (nothing was matched against),
+    `text_label` ("Caption", or "Title" for YouTube) when the keyword appears in
+    the text outside its #hashtags, and "Hashtag" when it only appears inside a
+    hashtag. Only meant for rows that already passed the keyword filter.
+    """
+    if not keywords:
+        return ""
+    without_hashtags = re.sub(r'#[^\s#]+', ' ', text or "")
+    return text_label if matches_keywords(without_hashtags, keywords) else "Hashtag"
+
+
 def matches_keywords(text, keywords):
     """Check if text contains any of the keywords as a whole word, case-insensitive.
 
@@ -2064,6 +2104,7 @@ def make_error_row(ch, reason=""):
         "saves": "",
         "duration": "",
         "caption": caption,
+        "match_source": "",
         "order": ch.get("order", 0),
     }
 
@@ -2125,7 +2166,8 @@ def compute_er_pct(row):
 def write_results_to_sheet(sheets_service, result_tab_name, results, progress_callback=None):
     """Write matched results to the 'Result' tab starting from row 4.
     A=Channel Name, B=Subscribe, C=Social Media, D=Link, E=Content Type,
-    F=Date, G=Views, H=Like, I=Comment, J=Share, K=Save, L=Duration(min), M=ER%, N=Caption
+    F=Date, G=Views, H=Like, I=Comment, J=Share, K=Save, L=Duration(min), M=ER%, N=Caption,
+    O=Matched by (Title / Caption / Hashtag / Direct link; blank if no keywords)
     """
     if not results:
         # Deliberately do NOT clear the sheet here. A run that matched nothing
@@ -2135,8 +2177,8 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
             progress_callback("  No results to write - leaving the existing data in the Result tab untouched")
         return
 
-    # Clear existing data from row 4 onwards (columns A-N)
-    clear_range = f"'{result_tab_name}'!A4:N"
+    # Clear existing data from row 4 onwards (columns A-O)
+    clear_range = f"'{result_tab_name}'!A4:O"
     sheets_service.spreadsheets().values().clear(
         spreadsheetId=SPREADSHEET_ID,
         range=clear_range
@@ -2167,6 +2209,7 @@ def write_results_to_sheet(sheets_service, result_tab_name, results, progress_ca
             r["duration"],                   # L = Duration (minute)
             er_pct,                          # M = ER%
             sheet_text(r["caption"]),        # N
+            sheet_text(r.get("match_source", "")),  # O = Matched by
         ])
 
     range_str = f"'{result_tab_name}'!A4"
@@ -2349,6 +2392,13 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
         # be sorted back into that order at the end.
         for item in items:
             item["order"] = ch.get("order", 0)
+            # Where the keyword match came from, for the "Matched by" column.
+            if ch.get("content_link"):
+                item["match_source"] = "Direct link"  # fetched on request, no filters
+            else:
+                item["match_source"] = keyword_match_source(
+                    item.get("caption", ""), keywords,
+                    "Title" if item.get("platform") == "youtube" else "Caption")
         all_results.extend(items)
 
     def add_error(ch, platform, reason):
@@ -2550,7 +2600,7 @@ def run_fetcher(progress_callback=None, progress_percent_callback=None, should_c
             writer = csv.DictWriter(f, fieldnames=[
                 "channel_name", "subscribers", "platform", "link", "content_type",
                 "published_date", "views", "likes", "comments", "shares", "saves",
-                "duration", "er_pct", "caption"
+                "duration", "er_pct", "caption", "match_source"
             ])
             writer.writeheader()
             writer.writerows(all_results)
